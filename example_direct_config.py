@@ -5,13 +5,13 @@ This example demonstrates how to configure crewAI to use a custom OpenAI-compati
 by directly specifying the LLM configuration in code.
 """
 
+import os
 from crewai import Agent, Task, Crew, LLM
 
-# Create LLM instance with custom configuration
+# Config loaded from .env via load_dotenv()
+# OPENAI_API_KEY, OPENAI_BASE_URL, and OPENAI_MODEL_NAME are read from environment
 llm = LLM(
-    model="gemini-3-pro-low",
-    base_url="http://127.0.0.1:8045/v1",
-    api_key="sk-fb15b52041f0451ca13f2aad7aebcc00",
+    model=os.environ.get("OPENAI_MODEL_NAME", "gemini-3-pro-low"),
     temperature=0.7,
     max_tokens=2000
 )

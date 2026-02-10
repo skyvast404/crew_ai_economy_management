@@ -8,14 +8,10 @@ environment variables and code configuration.
 import os
 from crewai import Agent, Task, Crew, LLM
 
-# Set environment variables programmatically
-os.environ["OPENAI_API_KEY"] = "sk-ant-oat01-G2Hn_a2kkZ_Z-KdrawsLVOssknJxBNo2X6XCLteEQEmNqeeGH-6LgyGV-WQFw8_LKvQp6vT-2XnbheJUazTzyba4aRO7xAA"
-os.environ["OPENAI_BASE_URL"] = "https://code.newcli.com/codex/v1"
-
-# Create LLM with model name and optional parameters
-# API key and base_url are read from environment variables
+# Config loaded from .env file
+# OPENAI_API_KEY, OPENAI_BASE_URL, and OPENAI_MODEL_NAME are read from environment
 llm = LLM(
-    model="gpt-5.2",
+    model=os.environ.get("OPENAI_MODEL_NAME", "gemini-3-pro-low"),
     temperature=0.7,
     max_tokens=2000
 )
