@@ -21,6 +21,9 @@ from crewai.events.types.agent_events import (
 )
 from crewai.events.types.task_events import TaskCompletedEvent, TaskStartedEvent
 
+from lib_custom.crew_builder import CrewBuilder
+from lib_custom.role_repository import RoleRepository
+
 
 # ---------------------------------------------------------------------------
 # Message store: thread-safe shared state between crew thread and Streamlit
@@ -148,200 +151,14 @@ ROLE_AVATARS = {
 # ---------------------------------------------------------------------------
 
 def build_crew(topic: str, num_rounds: int = 3) -> Crew:
-    """Create a Crew with 4 social role agents discussing the given topic.
+    """Create a Crew with agents from role configuration.
 
-    Generates num_rounds × 4 conversation tasks plus a final analyst task.
+    Generates num_rounds × N conversation tasks plus a final analyst task.
     """
-
-    boss = Agent(
-        role="老板 (Boss)",
-        goal="推动项目按时交付，维护自己的权威",
-        backstory=(
-            "你是公司部门老板，强势、关注KPI、喜欢甩锅。"
-            "你习惯用命令式语气说话，经常把'deadline'挂在嘴边。"
-            "当出了问题时，你第一反应是找人背锅而不是解决问题。"
-        ),
-        verbose=False,
-        allow_delegation=False,
-    )
-
-    senior = Agent(
-        role="资深员工 (Senior)",
-        goal="保住自己的地位不被新人取代，同时邀功",
-        backstory=(
-            "你是公司老油条，工作十年，擅长邀功和暗中使绊。"
-            "你表面上对所有人都很客气，但说话总是绵里藏针。"
-            "你最擅长把自己的失误推给别人，把别人的功劳揽到自己身上。"
-        ),
-        verbose=False,
-        allow_delegation=False,
-    )
-
-    newbie = Agent(
-        role="新人 (Newbie)",
-        goal="证明自己的能力，获得晋升机会",
-        backstory=(
-            "你是刚入职半年的新人，充满热情但有些天真。"
-            "你总是积极发言想表现自己，但经常不知不觉踩到别人的坑。"
-            "你还没学会办公室的潜规则，说话太直接。"
-        ),
-        verbose=False,
-        allow_delegation=False,
-    )
-
-    hr = Agent(
-        role="HR",
-        goal="维持团队表面和谐，收集信息",
-        backstory=(
-            "你是HR部门的资深员工，擅长打太极和和稀泥。"
-            "你表面上谁都不得罪，但私下收集所有人的八卦。"
-            "你的发言总是两面讨好，最后各打五十大板。"
-        ),
-        verbose=False,
-        allow_delegation=False,
-    )
-
-    analyst = Agent(
-        role="分析师 (Analyst)",
-        goal="从组织行为学角度，用学术研究框架分析多智能体群体互动动态",
-        backstory=(
-            "你是组织行为学与人力资源管理领域的研究者，"
-            "熟悉 Kacmar & Ferris (1991) 的组织政治感知量表(POPS)、"
-            "社会交换理论、资源保存理论(COR)、印象管理理论、"
-            "Mintzberg 的权力博弈框架和 Pfeffer 的资源依赖理论。"
-            "你擅长从对话数据中识别自变量、因变量、中介变量和调节变量，"
-            "并将观察到的行为映射到经管论文常用的硬指标（绩效类）和软指标（行为类）。"
-        ),
-        verbose=False,
-        allow_delegation=False,
-    )
-
-    # Dynamic task chain: num_rounds × 4 agents per round
-    agents = [boss, senior, newbie, hr]
-
-    # Per-role prompt templates: (round 1, round 2+)
-    round1_prompts = {
-        "老板 (Boss)": (
-            f"会议议题：{topic}\n"
-            "你是老板，请宣布这个议题并表达你的立场。"
-            "用你一贯的强势风格发言，可以暗示要追究责任。"
-            "用中文回答。"
-        ),
-        "资深员工 (Senior)": (
-            f"会议议题：{topic}\n"
-            "你是资深员工，请回应老板的发言。"
-            "表面上附和老板，但暗中把责任往新人身上引导。"
-            "用中文回答。"
-        ),
-        "新人 (Newbie)": (
-            f"会议议题：{topic}\n"
-            "你是新人，请回应前面的讨论。"
-            "你想表现自己但不太懂办公室政治，"
-            "可能会天真地说出一些让自己陷入困境的话。"
-            "用中文回答。"
-        ),
-        "HR": (
-            f"会议议题：{topic}\n"
-            "你是HR，请对前面所有人的发言做总结。"
-            "用你擅长的和稀泥方式，各打五十大板，"
-            "表面上化解矛盾但实际上什么都没解决。"
-            "用中文回答。"
-        ),
-    }
-
-    followup_prompts = {
-        "老板 (Boss)": (
-            f"会议议题：{topic}\n"
-            "这是第{{round}}轮讨论。根据前面的讨论继续推进，"
-            "你可以追问、施压或甩锅。保持你的强势风格。"
-            "用中文回答。"
-        ),
-        "资深员工 (Senior)": (
-            f"会议议题：{topic}\n"
-            "这是第{{round}}轮讨论。根据局势变化调整策略，"
-            "可以见风使舵、邀功或继续给新人挖坑。"
-            "用中文回答。"
-        ),
-        "新人 (Newbie)": (
-            f"会议议题：{topic}\n"
-            "这是第{{round}}轮讨论。根据前面的讨论回应，"
-            "你可能开始意识到被针对，尝试辩解或反击。"
-            "用中文回答。"
-        ),
-        "HR": (
-            f"会议议题：{topic}\n"
-            "这是第{{round}}轮讨论。继续观察局势，适时调停，"
-            "但也在暗中收集信息，为后续做准备。"
-            "用中文回答。"
-        ),
-    }
-
-    expected_outputs = {
-        "老板 (Boss)": "老板的发言",
-        "资深员工 (Senior)": "资深员工的回应",
-        "新人 (Newbie)": "新人的回应",
-        "HR": "HR的回应",
-    }
-
-    tasks: list[Task] = []
-
-    for round_idx in range(num_rounds):
-        round_num = round_idx + 1
-        for agent in agents:
-            if round_idx == 0:
-                desc = round1_prompts[agent.role]
-            else:
-                desc = followup_prompts[agent.role].format(round=round_num)
-
-            # Context: up to the last 2 rounds (8 tasks)
-            ctx = tasks[-8:] if tasks else []
-
-            task = Task(
-                description=desc,
-                expected_output=f"第{round_num}轮 - {expected_outputs[agent.role]}",
-                agent=agent,
-                context=ctx,
-            )
-            tasks.append(task)
-
-    # Final analyst task — context is ALL conversation tasks
-    analyst_task = Task(
-        description=(
-            f"会议议题：{topic}\n"
-            f"以上是{num_rounds}轮多智能体群体讨论的完整记录。\n"
-            "请从组织行为学角度进行深度学术分析，严格按以下4个模块输出：\n\n"
-            "## 1. 硬指标：绩效影响分析\n"
-            "- **任务绩效(Task Performance)**：各角色行为对工作产出的影响\n"
-            "- **组织绩效**：团队整体决策质量、协作效率的变化\n\n"
-            "## 2. 软指标：行为变量识别\n"
-            "- **组织公民行为(OCB)**：是否有人主动帮助/利他行为，或OCB被抑制\n"
-            "- **创新行为(Innovative Behavior)**：新想法是否被鼓励还是被群体互动环境扼杀\n"
-            "- **不道德行为/亲组织不道德行为(UPB)**：甩锅、信息操纵、背后中伤等\n"
-            "- **离职意愿(Turnover Intention)信号**：哪些角色表现出退缩/脱离迹象\n\n"
-            "## 3. 变量关系建模\n"
-            "- **自变量(IV)**：核心驱动因素（如组织政治感知(POPS)）\n"
-            "- **因变量(DV)**：结果变量（绩效、行为等）\n"
-            "- **中介变量(Mediator)**：传导机制（工作满意度、组织承诺、心理压力等）\n"
-            "- **调节变量(Moderator)**：边界条件（政治技能、领导风格、道德认同等）\n"
-            "- **可提炼的研究假设(H1, H2...)**\n\n"
-            "## 4. 量表与方法论建议\n"
-            "- 对应的经典量表推荐（POPS、OCB量表、任务绩效量表等）\n"
-            "- 适用的理论框架（社会交换理论、COR理论、组织公平理论等）\n"
-            "- 建议的研究模型路径图描述\n\n"
-            "用中文回答。"
-        ),
-        expected_output="结构化的多智能体群体互动分析报告",
-        agent=analyst,
-        context=list(tasks),
-    )
-    tasks.append(analyst_task)
-
-    return Crew(
-        agents=[*agents, analyst],
-        tasks=tasks,
-        process=Process.sequential,
-        verbose=False,
-    )
+    repo = RoleRepository()
+    db = repo.load_roles()
+    builder = CrewBuilder(db)
+    return builder.build_crew(topic, num_rounds)
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +182,14 @@ def run_crew_in_background(crew: Crew, store: ChatMessageStore):
 # Render chat messages in Streamlit
 # ---------------------------------------------------------------------------
 
-CONVERSATION_ROLES = {"老板 (Boss)", "资深员工 (Senior)", "新人 (Newbie)", "HR"}
+def get_conversation_role_names() -> set[str]:
+    """Get current conversation role names from repository."""
+    try:
+        repo = RoleRepository()
+        db = repo.load_roles()
+        return {role.role_name for role in db.get_conversation_roles()}
+    except Exception:
+        return {"老板 (Boss)", "资深员工 (Senior)", "新人 (Newbie)", "HR"}
 
 
 def format_messages_as_markdown(
@@ -391,7 +215,8 @@ def format_messages_as_markdown(
             analyst_content = msg.content
             continue
 
-        if msg.role not in CONVERSATION_ROLES:
+        conversation_roles = get_conversation_role_names()
+        if msg.role not in conversation_roles:
             continue
 
         if msgs_in_round % 4 == 0:
