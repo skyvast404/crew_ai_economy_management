@@ -9,9 +9,14 @@ from lib_custom.role_models import RoleConfig, RolesDatabase
 class CrewBuilder:
     """Builds CrewAI agents and tasks from role configurations."""
 
-    def __init__(self, roles_db: RolesDatabase):
-        """Initialize with roles database."""
+    def __init__(self, roles_db: RolesDatabase, config: dict | None = None):
+        """Initialize with roles database and optional configuration."""
         self.roles_db = roles_db
+        self.config = config or {
+            "agent_timeout": 120,
+            "max_iterations": 5,
+            "context_window": 4,
+        }
 
     def build_agent(self, role_config: RoleConfig) -> Agent:
         """Create an Agent from RoleConfig."""
@@ -21,6 +26,8 @@ class CrewBuilder:
             backstory=role_config.backstory,
             verbose=False,
             allow_delegation=False,
+            max_iter=self.config["max_iterations"],
+            max_execution_time=self.config["agent_timeout"],
         )
 
     def create_conversation_task(
@@ -101,8 +108,9 @@ class CrewBuilder:
             round_num = round_idx + 1
             for i, agent in enumerate(conv_agents):
                 role_config = conv_roles[i]
-                # Context: last 2 rounds (8 tasks max)
-                ctx = tasks[-8:] if tasks else []
+                # Context: configurable window size
+                context_size = self.config["context_window"]
+                ctx = tasks[-context_size:] if tasks else []
                 task = self.create_conversation_task(
                     agent, role_config, topic, round_num, ctx
                 )
@@ -119,6 +127,7 @@ class CrewBuilder:
             tasks=tasks,
             process=Process.sequential,
             verbose=False,
+            max_rpm=10,  # Limit requests per minute
         )
 
     @staticmethod
@@ -225,6 +234,8 @@ def build_comparison_crew(
         backstory="你是资深组织行为学研究者，擅长跨条件对比分析和领导力研究。",
         verbose=False,
         allow_delegation=False,
+        max_iter=5,
+        max_execution_time=120,
     )
 
     task = Task(
@@ -238,4 +249,5 @@ def build_comparison_crew(
         tasks=[task],
         process=Process.sequential,
         verbose=False,
+        max_rpm=10,
     )

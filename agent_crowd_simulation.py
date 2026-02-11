@@ -4,14 +4,21 @@ A Streamlit app that uses crewAI agents to simulate multi-agent crowd interactio
 Supports comparing the same topic under multiple leadership styles.
 """
 
+import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
+from urllib.error import URLError
+from urllib.request import urlopen
 
 import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 from crewai import Crew
 from crewai.events.event_bus import crewai_event_bus
@@ -24,6 +31,54 @@ from crewai.events.types.task_events import TaskCompletedEvent, TaskStartedEvent
 from lib_custom.crew_builder import CrewBuilder, build_comparison_crew
 from lib_custom.leadership_styles import LEADERSHIP_STYLES, apply_style_to_roles
 from lib_custom.role_repository import RoleRepository
+
+
+# ---------------------------------------------------------------------------
+# Environment validation
+# ---------------------------------------------------------------------------
+
+def validate_api_endpoint() -> tuple[bool, str]:
+    """Validate that the API endpoint is reachable.
+
+    Returns:
+        (is_valid, error_message)
+    """
+    base_url = os.getenv("OPENAI_BASE_URL", "")
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    model_name = os.getenv("OPENAI_MODEL_NAME", "")
+
+    if not api_key:
+        return False, "❌ OPENAI_API_KEY 未设置，请检查 .env 文件"
+
+    if not base_url:
+        return False, "❌ OPENAI_BASE_URL 未设置，请检查 .env 文件"
+
+    # Log model configuration for debugging
+    if model_name:
+        logger.info(f"Using model: {model_name}")
+        if "gemini" in model_name.lower() and "127.0.0.1" not in base_url:
+            logger.warning(
+                f"Model '{model_name}' appears to be Gemini but URL is not local proxy. "
+                "Ensure your proxy correctly translates OpenAI API to Gemini."
+            )
+
+    # Check if it's a local proxy
+    if "127.0.0.1" in base_url or "localhost" in base_url:
+        try:
+            # Try to connect with a short timeout
+            test_url = base_url.replace("/v1", "")
+            with urlopen(test_url, timeout=3) as response:
+                response.read()
+            return True, ""
+        except URLError as e:
+            return False, f"❌ 无法连接到本地代理: {base_url}\n请确保代理服务正在运行\n错误: {e.reason}"
+        except TimeoutError:
+            return False, f"❌ 连接超时: {base_url}\n请检查代理服务是否正常"
+        except Exception as e:
+            return False, f"❌ 连接错误: {str(e)}"
+
+    # For remote endpoints, assume they're valid (will fail later with better error)
+    return True, ""
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +101,7 @@ class ChatMessageStore:
         self._lock = threading.Lock()
         self._done = False
         self._error: str | None = None
+        self._cancelled = False
 
     def add(self, msg: ChatMessage):
         with self._lock:
@@ -64,6 +120,11 @@ class ChatMessageStore:
             self._error = error
             self._done = True
 
+    def mark_cancelled(self):
+        with self._lock:
+            self._cancelled = True
+            self._done = True
+
     @property
     def done(self) -> bool:
         with self._lock:
@@ -73,6 +134,11 @@ class ChatMessageStore:
     def error(self) -> str | None:
         with self._lock:
             return self._error
+
+    @property
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +241,9 @@ def _render_results_tabs(
         messages = store.get_all()
 
         with tabs[i]:
-            if store.error:
+            if store.cancelled:
+                st.warning("⚠️ 此模拟已被取消")
+            elif store.error:
                 st.error(f"模拟出错: {store.error}")
             else:
                 render_messages(messages)
@@ -315,6 +383,7 @@ def run_multi_style_simulation(
     selected_style_ids: list[str],
     style_stores: dict[str, ChatMessageStore],
     progress_callback,
+    config: dict,
 ):
     """Run simulation for each selected style sequentially.
 
@@ -329,17 +398,33 @@ def run_multi_style_simulation(
     for idx, style_id in enumerate(selected_style_ids):
         style = LEADERSHIP_STYLES[style_id]
         store = style_stores[style_id]
+
+        # Check if cancelled before starting
+        if store.cancelled:
+            logger.info(f"Simulation cancelled before starting {style.style_name}")
+            break
+
         styled_db = apply_style_to_roles(base_db, style)
-        builder = CrewBuilder(styled_db)
+        builder = CrewBuilder(styled_db, config)
         crew = builder.build_crew(topic, num_rounds)
 
         try:
             _active_store = store
             progress_callback(idx, total_steps, style.style_name)
+            logger.info(f"Starting simulation for style: {style.style_name}")
+            logger.info(f"Topic: {topic}, Rounds: {num_rounds}")
+
+            # Run crew with timeout monitoring
+            start_time = time.time()
             crew.kickoff()
+            elapsed = time.time() - start_time
+
+            logger.info(f"Simulation completed for {style.style_name} in {elapsed:.1f}s")
             store.mark_done()
         except Exception as e:
-            store.mark_error(str(e))
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            logger.error(f"Simulation failed for {style.style_name}: {error_msg}")
+            store.mark_error(error_msg)
         finally:
             _active_store = None
 
@@ -356,11 +441,19 @@ def run_multi_style_simulation(
                 progress_callback(
                     len(selected_style_ids), total_steps, "跨风格对比分析"
                 )
+                logger.info("Starting cross-style comparison analysis")
                 comparison_crew = build_comparison_crew(topic, style_conversations)
+
+                start_time = time.time()
                 comparison_crew.kickoff()
+                elapsed = time.time() - start_time
+
+                logger.info(f"Comparison analysis completed in {elapsed:.1f}s")
                 comparison_store.mark_done()
             except Exception as e:
-                comparison_store.mark_error(str(e))
+                error_msg = f"{type(e).__name__}: {str(e)}"
+                logger.error(f"Comparison analysis failed: {error_msg}")
+                comparison_store.mark_error(error_msg)
             finally:
                 _active_store = None
 
@@ -372,7 +465,7 @@ def run_multi_style_simulation(
 _progress_info: dict[str, str] = {}
 
 
-def _run_in_thread(topic, num_rounds, selected_style_ids, style_stores):
+def _run_in_thread(topic, num_rounds, selected_style_ids, style_stores, config):
     """Background thread entry point for multi-style simulation."""
 
     def progress_callback(step, total, label):
@@ -382,7 +475,7 @@ def _run_in_thread(topic, num_rounds, selected_style_ids, style_stores):
 
     try:
         run_multi_style_simulation(
-            topic, num_rounds, selected_style_ids, style_stores, progress_callback
+            topic, num_rounds, selected_style_ids, style_stores, progress_callback, config
         )
     finally:
         _progress_info["done"] = "true"
@@ -414,6 +507,31 @@ def main():
             "对话轮数", min_value=1, max_value=10, value=3,
             help="每轮角色各发言一次，轮数越多剧情越丰富",
         )
+
+        with st.expander("🔧 高级设置", expanded=False):
+            agent_timeout = st.slider(
+                "Agent超时时间（秒）",
+                min_value=30,
+                max_value=300,
+                value=120,
+                step=30,
+                help="单个Agent的最大执行时间，超时后会终止",
+            )
+            max_iterations = st.slider(
+                "最大迭代次数",
+                min_value=1,
+                max_value=10,
+                value=5,
+                help="防止Agent陷入无限循环",
+            )
+            context_window = st.slider(
+                "上下文窗口（任务数）",
+                min_value=2,
+                max_value=12,
+                value=4,
+                step=2,
+                help="每个Agent能看到的历史任务数量，越大消耗越多token",
+            )
 
         st.divider()
         st.subheader("领导风格选择")
@@ -457,9 +575,22 @@ def main():
         st.session_state.sim_num_rounds = 3
     if "selected_style_ids" not in st.session_state:
         st.session_state.selected_style_ids = []
+    if "agent_timeout" not in st.session_state:
+        st.session_state.agent_timeout = 120
+    if "max_iterations" not in st.session_state:
+        st.session_state.max_iterations = 5
+    if "context_window" not in st.session_state:
+        st.session_state.context_window = 4
 
     # -- Handle start button --
     if start_btn and not st.session_state.running and selected_styles:
+        # Validate API endpoint before starting
+        is_valid, error_msg = validate_api_endpoint()
+        if not is_valid:
+            st.error(error_msg)
+            st.info("💡 提示：如果使用本地代理，请确保代理服务正在运行")
+            st.stop()
+
         stores: dict[str, ChatMessageStore] = {}
         for sid in selected_styles:
             stores[sid] = ChatMessageStore()
@@ -471,12 +602,21 @@ def main():
         st.session_state.sim_topic = topic
         st.session_state.sim_num_rounds = num_rounds
         st.session_state.selected_style_ids = list(selected_styles)
+        st.session_state.agent_timeout = agent_timeout
+        st.session_state.max_iterations = max_iterations
+        st.session_state.context_window = context_window
 
         _progress_info.clear()
 
+        config = {
+            "agent_timeout": agent_timeout,
+            "max_iterations": max_iterations,
+            "context_window": context_window,
+        }
+
         thread = threading.Thread(
             target=_run_in_thread,
-            args=(topic, num_rounds, list(selected_styles), stores),
+            args=(topic, num_rounds, list(selected_styles), stores, config),
             daemon=True,
         )
         thread.start()
@@ -496,13 +636,29 @@ def main():
 
         if not (all_done and comparison_done):
             label = _progress_info.get("label", "准备中...")
-            st.info(f"🔄 模拟进行中 — {label}")
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.info(f"🔄 模拟进行中 — {label}")
+            with col2:
+                if st.button("🛑 取消模拟", type="secondary", use_container_width=True):
+                    # Mark all stores as cancelled
+                    for store in style_stores.values():
+                        store.mark_cancelled()
+                    st.session_state.running = False
+                    st.warning("⚠️ 模拟已取消")
+                    st.rerun()
             time.sleep(1.5)
             st.rerun()
 
         # All done — stop polling
         st.session_state.running = False
-        st.success("✅ 所有风格模拟完成！")
+
+        # Check if any were cancelled
+        any_cancelled = any(store.cancelled for store in style_stores.values())
+        if any_cancelled:
+            st.warning("⚠️ 模拟已被用户取消")
+        else:
+            st.success("✅ 所有风格模拟完成！")
 
     if style_stores and not st.session_state.running:
         _render_results_tabs(style_stores, style_ids)
