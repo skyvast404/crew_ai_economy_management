@@ -80,6 +80,40 @@ class TestRoleConfig:
         assert role.followup_prompt is None
         assert role.analyst_prompt is None
 
+    def test_personality_fields_optional(self):
+        """Test personality fields default to None."""
+        role = RoleConfig(
+            role_id="test_role",
+            role_name="Test Role",
+            goal="Test goal for the role",
+            backstory="Test backstory for the role",
+            avatar="🎭",
+            role_type="conversation",
+        )
+        assert role.personality is None
+        assert role.communication_style is None
+        assert role.emotional_tendency is None
+        assert role.values is None
+
+    def test_personality_fields_settable(self):
+        """Test personality fields can be set."""
+        role = RoleConfig(
+            role_id="test_role",
+            role_name="Test Role",
+            goal="Test goal for the role",
+            backstory="Test backstory for the role",
+            avatar="🎭",
+            role_type="conversation",
+            personality="果断",
+            communication_style="直接",
+            emotional_tendency="冷静",
+            values="效率",
+        )
+        assert role.personality == "果断"
+        assert role.communication_style == "直接"
+        assert role.emotional_tendency == "冷静"
+        assert role.values == "效率"
+
 
 class TestRolesDatabase:
     """Test RolesDatabase validation."""
@@ -192,3 +226,21 @@ class TestDefaultRoles:
 
         analyst = db.get_analyst_role()
         assert analyst.analyst_prompt is not None
+
+    def test_default_roles_have_personality(self):
+        """Test default conversation roles have personality attributes."""
+        db = create_default_roles()
+        conv_roles = db.get_conversation_roles()
+        for role in conv_roles:
+            assert role.personality is not None
+            assert role.communication_style is not None
+            assert role.emotional_tendency is not None
+            assert role.values is not None
+
+    def test_default_prompts_have_personality_placeholders(self):
+        """Test default prompts include personality variable placeholders."""
+        for prompt in (DEFAULT_ROUND_1_PROMPT, DEFAULT_FOLLOWUP_PROMPT):
+            assert "{personality}" in prompt
+            assert "{communication_style}" in prompt
+            assert "{emotional_tendency}" in prompt
+            assert "{values}" in prompt

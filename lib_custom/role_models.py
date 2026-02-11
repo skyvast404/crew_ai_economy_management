@@ -16,6 +16,12 @@ class RoleConfig(BaseModel):
     is_default: bool = False
     order: int = Field(default=0, ge=0)
 
+    # Personality attributes
+    personality: str | None = None
+    communication_style: str | None = None
+    emotional_tendency: str | None = None
+    values: str | None = None
+
     # Prompt templates
     round_1_prompt: str | None = None
     followup_prompt: str | None = None
@@ -81,11 +87,21 @@ DEFAULT_ROUND_1_PROMPT = """你是{role_name}。
 
 你的背景: {backstory}
 
+你的性格: {personality}
+你的沟通风格: {communication_style}
+你的情绪倾向: {emotional_tendency}
+你的价值观: {values}
+
 当前会议主题: {topic}
 
 请根据你的角色定位，发表你对这个主题的初步看法。注意保持你的角色特征和说话风格。"""
 
 DEFAULT_FOLLOWUP_PROMPT = """你是{role_name}。
+
+你的性格: {personality}
+你的沟通风格: {communication_style}
+你的情绪倾向: {emotional_tendency}
+你的价值观: {values}
 
 会议主题: {topic}
 
@@ -94,7 +110,7 @@ DEFAULT_FOLLOWUP_PROMPT = """你是{role_name}。
 
 请根据之前的讨论，继续发表你的看法。注意:
 1. 回应其他人的观点
-2. 保持你的角色特征
+2. 保持你的角色特征和沟通风格
 3. 推进讨论或维护你的立场"""
 
 DEFAULT_ANALYST_PROMPT = """你是组织行为学研究者。请分析以下会议讨论:
@@ -143,6 +159,10 @@ def create_default_roles() -> RolesDatabase:
             role_type="conversation",
             is_default=True,
             order=0,
+            personality="果断、强势、目标导向",
+            communication_style="直接、简洁、命令式",
+            emotional_tendency="冷静但容易因进度问题焦虑",
+            values="效率、结果、责任",
             round_1_prompt=DEFAULT_ROUND_1_PROMPT,
             followup_prompt=DEFAULT_FOLLOWUP_PROMPT,
         ),
@@ -155,6 +175,10 @@ def create_default_roles() -> RolesDatabase:
             role_type="conversation",
             is_default=True,
             order=1,
+            personality="圆滑、务实、老练",
+            communication_style="委婉、暗示、善于察言观色",
+            emotional_tendency="表面平静，内心精于算计",
+            values="稳定、自保、经验主义",
             round_1_prompt=DEFAULT_ROUND_1_PROMPT,
             followup_prompt=DEFAULT_FOLLOWUP_PROMPT,
         ),
@@ -167,6 +191,10 @@ def create_default_roles() -> RolesDatabase:
             role_type="conversation",
             is_default=True,
             order=2,
+            personality="热情、敏感、急于表现",
+            communication_style="积极、略显紧张、倾向附和权威",
+            emotional_tendency="容易焦虑和自我怀疑，但充满干劲",
+            values="成长、认可、学习",
             round_1_prompt=DEFAULT_ROUND_1_PROMPT,
             followup_prompt=DEFAULT_FOLLOWUP_PROMPT,
         ),
