@@ -121,6 +121,27 @@ if st.session_state.editing_role:
             goal = st.text_area("目标", value=role.goal, height=100)
             backstory = st.text_area("背景故事", value=role.backstory, height=150)
 
+            # Personality attributes (conversation roles only)
+            if role.role_type == "conversation":
+                st.divider()
+                st.subheader("角色特征")
+                personality = st.text_input(
+                    "性格", value=role.personality or "",
+                    help="如：果断、强势、目标导向",
+                )
+                communication_style = st.text_input(
+                    "沟通风格", value=role.communication_style or "",
+                    help="如：直接、简洁、命令式",
+                )
+                emotional_tendency = st.text_input(
+                    "情绪倾向", value=role.emotional_tendency or "",
+                    help="如：冷静但容易因进度问题焦虑",
+                )
+                values_field = st.text_input(
+                    "价值观", value=role.values or "",
+                    help="如：效率、结果、责任",
+                )
+
             st.divider()
             st.subheader("提示词模板")
 
@@ -160,6 +181,10 @@ if st.session_state.editing_role:
                         if role.role_type == "conversation":
                             updates["round_1_prompt"] = round_1_prompt or None
                             updates["followup_prompt"] = followup_prompt or None
+                            updates["personality"] = personality or None
+                            updates["communication_style"] = communication_style or None
+                            updates["emotional_tendency"] = emotional_tendency or None
+                            updates["values"] = values_field or None
                         else:
                             updates["analyst_prompt"] = analyst_prompt or None
 
@@ -188,6 +213,23 @@ if st.session_state.show_add_form:
         role_type = st.selectbox("角色类型", ["conversation", "analyst"])
         goal = st.text_area("目标", height=100)
         backstory = st.text_area("背景故事", height=150)
+
+        # Personality attributes (conversation roles only)
+        if role_type == "conversation":
+            st.divider()
+            st.subheader("角色特征 (可选)")
+            personality = st.text_input(
+                "性格", placeholder="如：果断、强势、目标导向", key="add_personality",
+            )
+            communication_style = st.text_input(
+                "沟通风格", placeholder="如：直接、简洁、命令式", key="add_comm_style",
+            )
+            emotional_tendency = st.text_input(
+                "情绪倾向", placeholder="如：冷静但容易因进度问题焦虑", key="add_emotion",
+            )
+            values_field = st.text_input(
+                "价值观", placeholder="如：效率、结果、责任", key="add_values",
+            )
 
         st.divider()
         st.subheader("提示词模板 (可选)")
@@ -228,6 +270,10 @@ if st.session_state.show_add_form:
                     if role_type == "conversation":
                         new_role.round_1_prompt = round_1_prompt or None
                         new_role.followup_prompt = followup_prompt or None
+                        new_role.personality = personality or None
+                        new_role.communication_style = communication_style or None
+                        new_role.emotional_tendency = emotional_tendency or None
+                        new_role.values = values_field or None
                     else:
                         new_role.analyst_prompt = analyst_prompt or None
 
