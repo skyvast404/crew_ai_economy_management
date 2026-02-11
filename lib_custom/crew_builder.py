@@ -2,6 +2,7 @@
 
 from crewai import Agent, Crew, Process, Task
 
+from lib_custom.leadership_styles import DEFAULT_COMPARISON_ANALYST_PROMPT
 from lib_custom.role_models import RoleConfig, RolesDatabase
 
 
@@ -40,6 +41,10 @@ class CrewBuilder:
             role_name=role_config.role_name,
             goal=role_config.goal,
             backstory=role_config.backstory,
+            personality=role_config.personality or "",
+            communication_style=role_config.communication_style or "",
+            emotional_tendency=role_config.emotional_tendency or "",
+            values=role_config.values or "",
             topic=topic,
             round=round_num,
             context="",
@@ -125,6 +130,11 @@ class CrewBuilder:
 
 你的背景: {backstory}
 
+你的性格: {personality}
+你的沟通风格: {communication_style}
+你的情绪倾向: {emotional_tendency}
+你的价值观: {values}
+
 当前会议主题: {topic}
 
 请根据你的角色定位，发表你对这个主题的初步看法。注意保持你的角色特征和说话风格。"""
@@ -134,6 +144,11 @@ class CrewBuilder:
         """Default prompt for followup rounds."""
         return """你是{role_name}。
 
+你的性格: {personality}
+你的沟通风格: {communication_style}
+你的情绪倾向: {emotional_tendency}
+你的价值观: {values}
+
 会议主题: {topic}
 
 之前的讨论:
@@ -141,7 +156,7 @@ class CrewBuilder:
 
 请根据之前的讨论，继续发表你的看法。注意:
 1. 回应其他人的观点
-2. 保持你的角色特征
+2. 保持你的角色特征和沟通风格
 3. 推进讨论或维护你的立场"""
 
     @staticmethod
@@ -179,3 +194,48 @@ class CrewBuilder:
 - 研究模型路径
 
 请提供结构化的学术分析报告。"""
+
+
+def build_comparison_crew(
+    topic: str, style_conversations: dict[str, str]
+) -> Crew:
+    """Build a crew for cross-style comparison analysis.
+
+    Args:
+        topic: The discussion topic.
+        style_conversations: Mapping of style_name -> conversation text.
+
+    Returns:
+        A Crew with a single comparison analyst agent and task.
+    """
+    # Format all style conversations into a single block
+    sections = []
+    for style_name, conversation in style_conversations.items():
+        sections.append(f"--- {style_name} ---\n{conversation}\n")
+    combined = "\n".join(sections)
+
+    description = DEFAULT_COMPARISON_ANALYST_PROMPT.format(
+        topic=topic,
+        style_conversations=combined,
+    )
+
+    agent = Agent(
+        role="跨风格对比分析师",
+        goal="对比分析不同领导风格下的团队互动差异",
+        backstory="你是资深组织行为学研究者，擅长跨条件对比分析和领导力研究。",
+        verbose=False,
+        allow_delegation=False,
+    )
+
+    task = Task(
+        description=description,
+        expected_output="结构化的跨领导风格对比分析报告",
+        agent=agent,
+    )
+
+    return Crew(
+        agents=[agent],
+        tasks=[task],
+        process=Process.sequential,
+        verbose=False,
+    )
