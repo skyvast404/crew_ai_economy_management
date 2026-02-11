@@ -1,7 +1,7 @@
 """Agent 人群模拟研究平台 - Agent Crowd Simulation Platform
 
 A Streamlit app that uses crewAI agents to simulate multi-agent crowd interactions.
-Each agent plays a different social role and responds to a user-defined topic.
+Supports comparing the same topic under multiple leadership styles.
 """
 
 import threading
@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from crewai import Agent, Crew, Process, Task
+from crewai import Crew
 from crewai.events.event_bus import crewai_event_bus
 from crewai.events.types.agent_events import (
     AgentExecutionCompletedEvent,
@@ -21,7 +21,8 @@ from crewai.events.types.agent_events import (
 )
 from crewai.events.types.task_events import TaskCompletedEvent, TaskStartedEvent
 
-from lib_custom.crew_builder import CrewBuilder
+from lib_custom.crew_builder import CrewBuilder, build_comparison_crew
+from lib_custom.leadership_styles import LEADERSHIP_STYLES, apply_style_to_roles
 from lib_custom.role_repository import RoleRepository
 
 
@@ -133,49 +134,85 @@ def _on_task_completed(source, event: TaskCompletedEvent):
 
 
 # ---------------------------------------------------------------------------
-# Avatar mapping for each role
+# Avatar mapping — built dynamically from role config
 # ---------------------------------------------------------------------------
 
-ROLE_AVATARS = {
-    "老板 (Boss)": "👔",
-    "资深员工 (Senior)": "🦊",
-    "新人 (Newbie)": "🐣",
-    "HR": "🎭",
-    "分析师 (Analyst)": "📊",
-    "system": "⚙️",
-}
-
-
-# ---------------------------------------------------------------------------
-# Build the crew: 4 social roles + sequential task chain
-# ---------------------------------------------------------------------------
-
-def build_crew(topic: str, num_rounds: int = 3) -> Crew:
-    """Create a Crew with agents from role configuration.
-
-    Generates num_rounds × N conversation tasks plus a final analyst task.
-    """
-    repo = RoleRepository()
-    db = repo.load_roles()
-    builder = CrewBuilder(db)
-    return builder.build_crew(topic, num_rounds)
+def get_role_avatars() -> dict[str, str]:
+    """Build avatar mapping from current role configuration."""
+    try:
+        repo = RoleRepository()
+        db = repo.load_roles()
+        avatars = {role.role_name: role.avatar for role in db.roles}
+        avatars["system"] = "⚙️"
+        avatars["跨风格对比分析师"] = "📊"
+        return avatars
+    except Exception:
+        return {"system": "⚙️"}
 
 
 # ---------------------------------------------------------------------------
 # Background thread runner
 # ---------------------------------------------------------------------------
 
-def run_crew_in_background(crew: Crew, store: ChatMessageStore):
-    """Run crew.kickoff() in a background thread."""
-    global _active_store
-    try:
-        _active_store = store
-        crew.kickoff()
-        store.mark_done()
-    except Exception as e:
-        store.mark_error(str(e))
-    finally:
-        _active_store = None
+def _render_results_tabs(
+    style_stores: dict[str, ChatMessageStore],
+    style_ids: list[str],
+):
+    """Render results in tabs — one per style + optional comparison tab."""
+    sim_topic = st.session_state.sim_topic
+    sim_rounds = st.session_state.sim_num_rounds
+
+    tab_names = [LEADERSHIP_STYLES[sid].style_name for sid in style_ids]
+    has_comparison = "__comparison__" in style_stores
+    if has_comparison:
+        tab_names.append("📊 跨风格对比分析")
+
+    tabs = st.tabs(tab_names)
+
+    for i, sid in enumerate(style_ids):
+        style = LEADERSHIP_STYLES[sid]
+        store = style_stores[sid]
+        messages = store.get_all()
+
+        with tabs[i]:
+            if store.error:
+                st.error(f"模拟出错: {store.error}")
+            else:
+                render_messages(messages)
+                render_analyst(messages)
+
+            md = format_messages_as_markdown(
+                messages, sim_topic, sim_rounds, style_name=style.style_name,
+            )
+            st.download_button(
+                f"📥 下载 {style.style_name} 记录",
+                data=md,
+                file_name=f"simulation_{sid}.md",
+                mime="text/markdown",
+                key=f"dl_{sid}",
+            )
+
+    if has_comparison:
+        comp_store = style_stores["__comparison__"]
+        comp_messages = comp_store.get_all()
+        with tabs[-1]:
+            if comp_store.error:
+                st.error(f"对比分析出错: {comp_store.error}")
+            else:
+                for msg in comp_messages:
+                    if msg.msg_type == "completed":
+                        st.markdown(msg.content)
+
+            comp_text = "\n\n".join(
+                msg.content for msg in comp_messages if msg.msg_type == "completed"
+            )
+            st.download_button(
+                "📥 下载跨风格对比分析",
+                data=comp_text,
+                file_name="comparison_analysis.md",
+                mime="text/markdown",
+                key="dl_comparison",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -189,20 +226,23 @@ def get_conversation_role_names() -> set[str]:
         db = repo.load_roles()
         return {role.role_name for role in db.get_conversation_roles()}
     except Exception:
-        return {"老板 (Boss)", "资深员工 (Senior)", "新人 (Newbie)", "HR"}
+        return {"老板 (Boss)", "资深员工 (Senior)", "新人 (Newbie)"}
 
 
 def format_messages_as_markdown(
-    messages: list[ChatMessage], topic: str, num_rounds: int,
+    messages: list[ChatMessage],
+    topic: str,
+    num_rounds: int,
+    style_name: str = "",
 ) -> str:
     """Format finished messages into a Markdown document for export."""
-    lines = [
-        "# Agent 人群模拟记录",
-        f"\n## 话题：{topic}",
-        f"\n对话轮数：{num_rounds}",
-        "",
-    ]
+    avatars = get_role_avatars()
+    conversation_roles = get_conversation_role_names()
 
+    header = f"# Agent 人群模拟记录 — {style_name}" if style_name else "# Agent 人群模拟记录"
+    lines = [header, f"\n## 话题：{topic}", f"\n对话轮数：{num_rounds}", ""]
+
+    num_conv_roles = len(conversation_roles) or 3
     current_round = 0
     msgs_in_round = 0
     analyst_content = ""
@@ -210,21 +250,15 @@ def format_messages_as_markdown(
     for msg in messages:
         if msg.msg_type != "completed":
             continue
-
-        if msg.role == "分析师 (Analyst)":
-            analyst_content = msg.content
-            continue
-
-        conversation_roles = get_conversation_role_names()
         if msg.role not in conversation_roles:
+            if "分析" in msg.role and msg.msg_type == "completed":
+                analyst_content = msg.content
             continue
-
-        if msgs_in_round % 4 == 0:
+        if msgs_in_round % num_conv_roles == 0:
             current_round += 1
             lines.append(f"\n### 第 {current_round} 轮\n")
         msgs_in_round += 1
-
-        avatar = ROLE_AVATARS.get(msg.role, "")
+        avatar = avatars.get(msg.role, "")
         lines.append(f"**{avatar} {msg.role}:**\n")
         lines.append(f"{msg.content}\n")
 
@@ -238,12 +272,13 @@ def format_messages_as_markdown(
 
 def render_messages(messages: list[ChatMessage]):
     """Render conversation messages (excludes analyst output)."""
+    avatars = get_role_avatars()
     for msg in messages:
         if msg.msg_type == "started":
             continue
-        if msg.role == "分析师 (Analyst)":
+        if "分析" in msg.role:
             continue
-        avatar = ROLE_AVATARS.get(msg.role, "💬")
+        avatar = avatars.get(msg.role, "💬")
         if msg.role == "system":
             st.caption(msg.content)
         else:
@@ -255,10 +290,102 @@ def render_messages(messages: list[ChatMessage]):
 def render_analyst(messages: list[ChatMessage]):
     """Render the analyst output in a separate expander."""
     for msg in messages:
-        if msg.role == "分析师 (Analyst)" and msg.msg_type == "completed":
+        if "分析" in msg.role and msg.msg_type == "completed":
             with st.expander("📊 群体互动分析", expanded=False):
                 st.markdown(msg.content)
             return
+
+
+def extract_conversation_text(messages: list[ChatMessage]) -> str:
+    """Extract completed conversation messages as plain text."""
+    parts = []
+    for msg in messages:
+        if msg.msg_type == "completed" and msg.role != "system":
+            parts.append(f"[{msg.role}]: {msg.content}")
+    return "\n\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Multi-style simulation runner (synchronous, called from background thread)
+# ---------------------------------------------------------------------------
+
+def run_multi_style_simulation(
+    topic: str,
+    num_rounds: int,
+    selected_style_ids: list[str],
+    style_stores: dict[str, ChatMessageStore],
+    progress_callback,
+):
+    """Run simulation for each selected style sequentially.
+
+    Populates style_stores with messages for each style, then runs comparison.
+    """
+    global _active_store
+    repo = RoleRepository()
+    base_db = repo.load_roles()
+    total_steps = len(selected_style_ids) + 1  # +1 for comparison
+    style_conversations: dict[str, str] = {}
+
+    for idx, style_id in enumerate(selected_style_ids):
+        style = LEADERSHIP_STYLES[style_id]
+        store = style_stores[style_id]
+        styled_db = apply_style_to_roles(base_db, style)
+        builder = CrewBuilder(styled_db)
+        crew = builder.build_crew(topic, num_rounds)
+
+        try:
+            _active_store = store
+            progress_callback(idx, total_steps, style.style_name)
+            crew.kickoff()
+            store.mark_done()
+        except Exception as e:
+            store.mark_error(str(e))
+        finally:
+            _active_store = None
+
+        style_conversations[style.style_name] = extract_conversation_text(
+            store.get_all()
+        )
+
+    # Run cross-style comparison if multiple styles selected
+    if len(selected_style_ids) > 1:
+        comparison_store = style_stores.get("__comparison__")
+        if comparison_store is not None:
+            try:
+                _active_store = comparison_store
+                progress_callback(
+                    len(selected_style_ids), total_steps, "跨风格对比分析"
+                )
+                comparison_crew = build_comparison_crew(topic, style_conversations)
+                comparison_crew.kickoff()
+                comparison_store.mark_done()
+            except Exception as e:
+                comparison_store.mark_error(str(e))
+            finally:
+                _active_store = None
+
+
+# ---------------------------------------------------------------------------
+# Background thread wrapper for multi-style simulation
+# ---------------------------------------------------------------------------
+
+_progress_info: dict[str, str] = {}
+
+
+def _run_in_thread(topic, num_rounds, selected_style_ids, style_stores):
+    """Background thread entry point for multi-style simulation."""
+
+    def progress_callback(step, total, label):
+        _progress_info["step"] = str(step)
+        _progress_info["total"] = str(total)
+        _progress_info["label"] = label
+
+    try:
+        run_multi_style_simulation(
+            topic, num_rounds, selected_style_ids, style_stores, progress_callback
+        )
+    finally:
+        _progress_info["done"] = "true"
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +400,7 @@ def main():
     )
 
     st.title("🔬 Agent 人群模拟研究")
-    st.caption("基于 LLM 多智能体的群体行为模拟与分析")
+    st.caption("基于 LLM 多智能体的群体行为模拟 — 领导风格对比分析")
 
     # -- Sidebar --
     with st.sidebar:
@@ -285,98 +412,103 @@ def main():
         )
         num_rounds = st.slider(
             "对话轮数", min_value=1, max_value=10, value=3,
-            help="每轮4个角色各发言一次，轮数越多剧情越丰富",
+            help="每轮角色各发言一次，轮数越多剧情越丰富",
         )
+
+        st.divider()
+        st.subheader("领导风格选择")
+        style_options = {
+            sid: s.style_name for sid, s in LEADERSHIP_STYLES.items()
+        }
+        selected_styles = st.multiselect(
+            "选择要对比的领导风格（至少1个）",
+            options=list(style_options.keys()),
+            default=list(style_options.keys()),
+            format_func=lambda sid: f"{style_options[sid]}",
+        )
+
+        # Show style descriptions
+        for sid in selected_styles:
+            style = LEADERSHIP_STYLES[sid]
+            st.caption(f"**{style.style_name}**: {style.description}")
+
         start_btn = st.button(
-            "🚀 开始模拟", type="primary", use_container_width=True,
+            "🚀 开始模拟",
+            type="primary",
+            use_container_width=True,
+            disabled=len(selected_styles) == 0,
         )
 
         st.divider()
         st.subheader("角色介绍")
-        for role, avatar in ROLE_AVATARS.items():
-            if role != "system":
-                st.write(f"{avatar} **{role}**")
+        avatars = get_role_avatars()
+        for role_name, avatar in avatars.items():
+            if role_name not in ("system", "跨风格对比分析师"):
+                st.write(f"{avatar} **{role_name}**")
 
     # -- Initialize session state --
-    if "store" not in st.session_state:
-        st.session_state.store = None
+    if "style_stores" not in st.session_state:
+        st.session_state.style_stores = {}
     if "running" not in st.session_state:
         st.session_state.running = False
-    if "finished_messages" not in st.session_state:
-        st.session_state.finished_messages = []
     if "sim_topic" not in st.session_state:
         st.session_state.sim_topic = ""
     if "sim_num_rounds" not in st.session_state:
         st.session_state.sim_num_rounds = 3
+    if "selected_style_ids" not in st.session_state:
+        st.session_state.selected_style_ids = []
 
     # -- Handle start button --
-    if start_btn and not st.session_state.running:
-        st.session_state.store = ChatMessageStore()
+    if start_btn and not st.session_state.running and selected_styles:
+        stores: dict[str, ChatMessageStore] = {}
+        for sid in selected_styles:
+            stores[sid] = ChatMessageStore()
+        if len(selected_styles) > 1:
+            stores["__comparison__"] = ChatMessageStore()
+
+        st.session_state.style_stores = stores
         st.session_state.running = True
-        st.session_state.finished_messages = []
         st.session_state.sim_topic = topic
         st.session_state.sim_num_rounds = num_rounds
+        st.session_state.selected_style_ids = list(selected_styles)
 
-        crew = build_crew(topic, num_rounds)
+        _progress_info.clear()
 
         thread = threading.Thread(
-            target=run_crew_in_background,
-            args=(crew, st.session_state.store),
+            target=_run_in_thread,
+            args=(topic, num_rounds, list(selected_styles), stores),
             daemon=True,
         )
         thread.start()
 
     # -- Main area: render based on state --
-    if st.session_state.running and st.session_state.store is not None:
-        store: ChatMessageStore = st.session_state.store
+    style_stores = st.session_state.style_stores
+    style_ids = st.session_state.selected_style_ids
 
-        if not store.done:
-            st.info("🔄 模拟进行中，请稍候...")
-            render_messages(store.get_all())
-            time.sleep(1.0)
+    if st.session_state.running and style_stores:
+        # Check if all stores are done
+        all_done = all(
+            store.done for sid, store in style_stores.items()
+            if sid != "__comparison__"
+        )
+        comparison_store = style_stores.get("__comparison__")
+        comparison_done = comparison_store.done if comparison_store else True
+
+        if not (all_done and comparison_done):
+            label = _progress_info.get("label", "准备中...")
+            st.info(f"🔄 模拟进行中 — {label}")
+            time.sleep(1.5)
             st.rerun()
 
-        # Crew finished — save results and stop polling
-        final_messages = store.get_all()
-        st.session_state.finished_messages = final_messages
+        # All done — stop polling
         st.session_state.running = False
+        st.success("✅ 所有风格模拟完成！")
 
-        if store.error:
-            st.error(f"模拟出错: {store.error}")
-        else:
-            st.success("✅ 模拟完成！")
-        render_messages(final_messages)
-        render_analyst(final_messages)
-        md = format_messages_as_markdown(
-            final_messages,
-            st.session_state.sim_topic,
-            st.session_state.sim_num_rounds,
-        )
-        st.download_button(
-            "📥 下载对话记录 (Markdown)",
-            data=md,
-            file_name="agent_crowd_simulation.md",
-            mime="text/markdown",
-        )
+    if style_stores and not st.session_state.running:
+        _render_results_tabs(style_stores, style_ids)
 
-    elif st.session_state.finished_messages:
-        st.success("✅ 模拟完成！")
-        render_messages(st.session_state.finished_messages)
-        render_analyst(st.session_state.finished_messages)
-        md = format_messages_as_markdown(
-            st.session_state.finished_messages,
-            st.session_state.sim_topic,
-            st.session_state.sim_num_rounds,
-        )
-        st.download_button(
-            "📥 下载对话记录 (Markdown)",
-            data=md,
-            file_name="agent_crowd_simulation.md",
-            mime="text/markdown",
-        )
-
-    else:
-        st.info("👈 在左侧输入话题，点击「开始模拟」开始多智能体群体模拟")
+    elif not style_stores:
+        st.info("👈 在左侧选择领导风格并输入话题，点击「开始模拟」")
 
 
 main()
