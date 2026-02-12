@@ -1,6 +1,6 @@
-"""LLM configuration with fallback support.
+"""LLM configuration for OpenRouter.
 
-Provides factory functions for creating primary and OpenRouter fallback LLMs.
+Provides factory functions for creating the primary LLM.
 """
 
 import logging
@@ -40,40 +40,10 @@ def create_primary_llm() -> LLM:
     return LLM(**kwargs)
 
 
-def create_openrouter_llm() -> LLM | None:
-    """Create an OpenRouter fallback LLM if configured.
-
-    Reads OPENROUTER_API_KEY and OPENROUTER_MODEL_NAME from env.
-
-    Returns:
-        LLM instance or None if not configured.
-    """
-    api_key = os.getenv("OPENROUTER_API_KEY", "")
-    model_name = os.getenv("OPENROUTER_MODEL_NAME", "")
-
-    if not api_key or not model_name:
-        logger.info("OpenRouter fallback not configured (missing OPENROUTER_API_KEY or OPENROUTER_MODEL_NAME)")
-        return None
-
-    full_model = f"openrouter/{model_name}" if not model_name.startswith("openrouter/") else model_name
-
-    logger.info("OpenRouter fallback LLM: model=%s", full_model)
-    try:
-        return LLM(
-            model=full_model,
-            base_url="https://openrouter.ai/api/v1",
-            api_key=api_key,
-        )
-    except ImportError as e:
-        logger.warning("OpenRouter fallback unavailable: %s", e)
-        return None
-
-
 def get_available_llms() -> list[tuple[str, LLM]]:
     """Return a list of (label, LLM) for all configured LLMs.
 
-    The primary LLM is always first. OpenRouter is appended if configured.
-    Entries with missing configuration are skipped.
+    Returns the primary LLM if configured, otherwise an empty list.
     """
     llms: list[tuple[str, LLM]] = []
 
@@ -81,9 +51,5 @@ def get_available_llms() -> list[tuple[str, LLM]]:
         llms.append(("主模型", create_primary_llm()))
     except ValueError as e:
         logger.warning("Primary LLM not available: %s", e)
-
-    openrouter = create_openrouter_llm()
-    if openrouter is not None:
-        llms.append(("OpenRouter", openrouter))
 
     return llms

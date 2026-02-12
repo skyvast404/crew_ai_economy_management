@@ -1229,6 +1229,13 @@ class LLM(BaseLLM):
         # --- 6) If there are tool calls but no available functions, return the tool calls
         # This allows the caller (e.g., executor) to handle tool execution
         if tool_calls and not available_functions:
+            self._handle_emit_call_events(
+                response=str(tool_calls),
+                call_type=LLMCallType.LLM_CALL,
+                from_task=from_task,
+                from_agent=from_agent,
+                messages=params["messages"],
+            )
             return tool_calls
 
         # --- 7) Handle tool calls if present (execute when available_functions provided)
@@ -1358,6 +1365,13 @@ class LLM(BaseLLM):
         # If there are tool calls but no available functions, return the tool calls
         # This allows the caller (e.g., executor) to handle tool execution
         if tool_calls and not available_functions:
+            self._handle_emit_call_events(
+                response=str(tool_calls),
+                call_type=LLMCallType.LLM_CALL,
+                from_task=from_task,
+                from_agent=from_agent,
+                messages=params["messages"],
+            )
             return tool_calls
 
         # Handle tool calls if present (execute when available_functions provided)

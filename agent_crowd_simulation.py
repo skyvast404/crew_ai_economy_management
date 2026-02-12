@@ -26,11 +26,15 @@ from crewai.events.types.agent_events import (
     AgentExecutionCompletedEvent,
     AgentExecutionStartedEvent,
 )
+from crewai.events.types.llm_events import (
+    LLMCallCompletedEvent,
+    LLMCallFailedEvent,
+    LLMCallStartedEvent,
+)
 from crewai.events.types.task_events import TaskCompletedEvent, TaskStartedEvent
 
 from lib_custom.crew_builder import CrewBuilder, build_comparison_crew
 from lib_custom.leadership_styles import LEADERSHIP_STYLES, apply_style_to_roles
-from lib_custom.llm_config import create_openrouter_llm, get_available_llms
 from lib_custom.role_repository import RoleRepository
 
 
@@ -57,53 +61,46 @@ def validate_api_endpoint() -> tuple[bool, str]:
     # Log model configuration for debugging
     if model_name:
         logger.info(f"Using model: {model_name}")
-        if "gemini" in model_name.lower() and "127.0.0.1" not in base_url:
-            logger.warning(
-                f"Model '{model_name}' appears to be Gemini but URL is not local proxy. "
-                "Ensure your proxy correctly translates OpenAI API to Gemini."
-            )
 
-    # Check if it's a local proxy
-    if "127.0.0.1" in base_url or "localhost" in base_url:
-        try:
-            # Use an authenticated OpenAI-compatible endpoint to validate both connectivity and auth.
-            test_url = base_url.rstrip("/") + "/models"
-            req = Request(
-                test_url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                },
-            )
-            with urlopen(req, timeout=5) as response:
-                response.read()
-            return True, ""
-        except HTTPError as e:
-            if e.code == 401:
-                return (
-                    False,
-                    f"❌ 本地代理鉴权失败 (401 Unauthorized): {base_url}\n"
-                    "请检查 OPENAI_API_KEY 是否正确，或代理是否需要不同的密钥格式。",
-                )
-            if e.code == 403:
-                return (
-                    False,
-                    f"❌ 本地代理无权限访问 (403 Forbidden): {base_url}\n"
-                    "请检查 API Key 权限或代理访问控制配置。",
-                )
+    # Health-check: validate connectivity and auth via /models endpoint
+    is_local = "127.0.0.1" in base_url or "localhost" in base_url
+    timeout = 5 if is_local else 10
+
+    try:
+        test_url = base_url.rstrip("/") + "/models"
+        req = Request(
+            test_url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+            },
+        )
+        with urlopen(req, timeout=timeout) as response:
+            response.read()
+        return True, ""
+    except HTTPError as e:
+        if e.code == 401:
             return (
                 False,
-                f"❌ 本地代理返回 HTTP {e.code}: {base_url}\n"
-                f"错误: {e.reason}",
+                f"❌ API 鉴权失败 (401 Unauthorized): {base_url}\n"
+                "请检查 OPENAI_API_KEY 是否正确。",
             )
-        except URLError as e:
-            return False, f"❌ 无法连接到本地代理: {base_url}\n请确保代理服务正在运行\n错误: {e.reason}"
-        except TimeoutError:
-            return False, f"❌ 连接超时: {base_url}\n请检查代理服务是否正常"
-        except Exception as e:
-            return False, f"❌ 连接错误: {str(e)}"
-
-    # For remote endpoints, assume they're valid (will fail later with better error)
-    return True, ""
+        if e.code == 403:
+            return (
+                False,
+                f"❌ API 无权限访问 (403 Forbidden): {base_url}\n"
+                "请检查 API Key 权限配置。",
+            )
+        return (
+            False,
+            f"❌ API 返回 HTTP {e.code}: {base_url}\n"
+            f"错误: {e.reason}",
+        )
+    except URLError as e:
+        return False, f"❌ 无法连接到 API: {base_url}\n错误: {e.reason}"
+    except TimeoutError:
+        return False, f"❌ 连接超时: {base_url}\n请检查服务是否正常"
+    except Exception as e:
+        return False, f"❌ 连接错误: {str(e)}"
 
 
 # ---------------------------------------------------------------------------
@@ -170,66 +167,97 @@ class ChatMessageStore:
 # Module-level active store pointer — handlers write here (registered once)
 # ---------------------------------------------------------------------------
 
-_active_store: ChatMessageStore | None = None
+if '_active_store' not in globals():
+    _active_store: ChatMessageStore | None = None
 
 
 # ---------------------------------------------------------------------------
 # Register event handlers ONCE at module level (singleton event bus)
+# Guard prevents duplicate registration on Streamlit rerun.
 # ---------------------------------------------------------------------------
 
-@crewai_event_bus.on(AgentExecutionStartedEvent)
-def _on_agent_started(source, event: AgentExecutionStartedEvent):
-    store = _active_store
-    if store is not None:
-        _progress_info["live"] = f"{event.agent.role} 开始发言"
+if '_handlers_registered' not in globals():
+    _handlers_registered = True
+
+    @crewai_event_bus.on(AgentExecutionStartedEvent)
+    def _on_agent_started(source, event: AgentExecutionStartedEvent):
+        store = _active_store
+        if store is not None:
+            _progress_info["live"] = f"{event.agent.role} 开始发言"
+            _progress_info["last_update"] = str(time.time())
+            store.add(ChatMessage(
+                role=event.agent.role,
+                content=f"*{event.agent.role} 开始发言...*",
+                msg_type="started",
+            ))
+
+    @crewai_event_bus.on(AgentExecutionCompletedEvent)
+    def _on_agent_completed(source, event: AgentExecutionCompletedEvent):
+        store = _active_store
+        if store is not None:
+            _progress_info["live"] = f"{event.agent.role} 发言完成"
+            _progress_info["last_update"] = str(time.time())
+            store.add(ChatMessage(
+                role=event.agent.role,
+                content=event.output,
+                msg_type="completed",
+            ))
+
+    @crewai_event_bus.on(TaskStartedEvent)
+    def _on_task_started(source, event: TaskStartedEvent):
+        store = _active_store
+        if store is not None:
+            desc = ""
+            if event.task and hasattr(event.task, "description"):
+                desc = event.task.description[:80]
+            _progress_info["live"] = f"任务开始: {desc}" if desc else "任务开始"
+            _progress_info["last_update"] = str(time.time())
+            store.add(ChatMessage(
+                role="system",
+                content=f"📋 任务开始: {desc}...",
+                msg_type="task_started",
+            ))
+
+    @crewai_event_bus.on(TaskCompletedEvent)
+    def _on_task_completed(source, event: TaskCompletedEvent):
+        store = _active_store
+        if store is not None:
+            _progress_info["live"] = "任务完成"
+            _progress_info["last_update"] = str(time.time())
+            store.add(ChatMessage(
+                role="system",
+                content="✅ 任务完成",
+                msg_type="task_completed",
+            ))
+
+    @crewai_event_bus.on(LLMCallStartedEvent)
+    def _on_llm_call_started(source, event: LLMCallStartedEvent):
+        _llm_call_info["status"] = "sending"
+        _llm_call_info["call_count"] = int(_llm_call_info.get("call_count", 0)) + 1
+        _llm_call_info["agent_role"] = getattr(event, "agent_role", "") or ""
+        _llm_call_info["model"] = getattr(event, "model", "") or ""
+        _llm_call_info["call_started_at"] = str(time.time())
+        _progress_info["live"] = f"📡 发送请求... ({_llm_call_info['agent_role'] or 'LLM'})"
         _progress_info["last_update"] = str(time.time())
-        store.add(ChatMessage(
-            role=event.agent.role,
-            content=f"*{event.agent.role} 开始发言...*",
-            msg_type="started",
-        ))
 
-
-@crewai_event_bus.on(AgentExecutionCompletedEvent)
-def _on_agent_completed(source, event: AgentExecutionCompletedEvent):
-    store = _active_store
-    if store is not None:
-        _progress_info["live"] = f"{event.agent.role} 发言完成"
+    @crewai_event_bus.on(LLMCallCompletedEvent)
+    def _on_llm_call_completed(source, event: LLMCallCompletedEvent):
+        _llm_call_info["status"] = "completed"
+        _llm_call_info["completed_count"] = int(_llm_call_info.get("completed_count", 0)) + 1
+        duration = ""
+        started = float(_llm_call_info.get("call_started_at", 0) or 0)
+        if started > 0:
+            duration = f" ({time.time() - started:.1f}s)"
+        _progress_info["live"] = f"✅ 收到响应{duration}"
         _progress_info["last_update"] = str(time.time())
-        store.add(ChatMessage(
-            role=event.agent.role,
-            content=event.output,
-            msg_type="completed",
-        ))
 
-
-@crewai_event_bus.on(TaskStartedEvent)
-def _on_task_started(source, event: TaskStartedEvent):
-    store = _active_store
-    if store is not None:
-        desc = ""
-        if event.task and hasattr(event.task, "description"):
-            desc = event.task.description[:80]
-        _progress_info["live"] = f"任务开始: {desc}" if desc else "任务开始"
+    @crewai_event_bus.on(LLMCallFailedEvent)
+    def _on_llm_call_failed(source, event: LLMCallFailedEvent):
+        _llm_call_info["status"] = "failed"
+        _llm_call_info["failed_count"] = int(_llm_call_info.get("failed_count", 0)) + 1
+        error_preview = str(event.error)[:60]
+        _progress_info["live"] = f"❌ 请求失败: {error_preview}"
         _progress_info["last_update"] = str(time.time())
-        store.add(ChatMessage(
-            role="system",
-            content=f"📋 任务开始: {desc}...",
-            msg_type="task_started",
-        ))
-
-
-@crewai_event_bus.on(TaskCompletedEvent)
-def _on_task_completed(source, event: TaskCompletedEvent):
-    store = _active_store
-    if store is not None:
-        _progress_info["live"] = "任务完成"
-        _progress_info["last_update"] = str(time.time())
-        store.add(ChatMessage(
-            role="system",
-            content="✅ 任务完成",
-            msg_type="task_completed",
-        ))
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +453,7 @@ def run_multi_style_simulation(
     global _active_store
     repo = RoleRepository()
     base_db = repo.load_roles()
-    total_steps = len(selected_style_ids) + 1  # +1 for comparison
+    total_steps = len(selected_style_ids) + (1 if len(selected_style_ids) > 1 else 0)
     style_conversations: dict[str, str] = {}
 
     for idx, style_id in enumerate(selected_style_ids):
@@ -437,11 +465,10 @@ def run_multi_style_simulation(
             logger.info(f"Simulation cancelled before starting {style.style_name}")
             break
 
-        styled_db = apply_style_to_roles(base_db, style)
-        builder = CrewBuilder(styled_db, config)
-        crew = builder.build_crew(topic, num_rounds)
-
         try:
+            styled_db = apply_style_to_roles(base_db, style)
+            builder = CrewBuilder(styled_db, config)
+            crew = builder.build_crew(topic, num_rounds)
             _active_store = store
             progress_callback(idx, total_steps, style.style_name)
             logger.info(f"Starting simulation for style: {style.style_name}")
@@ -458,35 +485,7 @@ def run_multi_style_simulation(
             error_msg = f"{type(e).__name__}: {str(e)}"
             logger.error(f"Simulation failed for {style.style_name}: {error_msg}")
 
-            # Attempt fallback with OpenRouter
-            fallback_llm = create_openrouter_llm()
-            if fallback_llm is not None:
-                logger.info(f"Retrying {style.style_name} with OpenRouter fallback")
-                _llm_route_info["active_provider"] = "openrouter"
-                store.add(ChatMessage(
-                    role="system",
-                    content="⚠️ 主模型调用失败，正在切换到 OpenRouter 备选模型...",
-                    msg_type="task_started",
-                ))
-                try:
-                    fallback_builder = CrewBuilder(styled_db, config, llm=fallback_llm)
-                    fallback_crew = fallback_builder.build_crew(topic, num_rounds)
-                    start_time = time.time()
-                    fallback_crew.kickoff()
-                    elapsed = time.time() - start_time
-                    logger.info(f"Fallback completed for {style.style_name} in {elapsed:.1f}s")
-                    store.add(ChatMessage(
-                        role="system",
-                        content="✅ OpenRouter 备选模型完成模拟",
-                        msg_type="task_completed",
-                    ))
-                    store.mark_done()
-                except Exception as fallback_err:
-                    fallback_msg = f"{type(fallback_err).__name__}: {str(fallback_err)}"
-                    logger.error(f"Fallback also failed for {style.style_name}: {fallback_msg}")
-                    store.mark_error(f"主模型: {error_msg}\nOpenRouter: {fallback_msg}")
-            else:
-                store.mark_error(error_msg)
+            store.mark_error(error_msg)
         finally:
             _active_store = None
 
@@ -516,30 +515,7 @@ def run_multi_style_simulation(
                 error_msg = f"{type(e).__name__}: {str(e)}"
                 logger.error(f"Comparison analysis failed: {error_msg}")
 
-                fallback_llm = create_openrouter_llm()
-                if fallback_llm is not None:
-                    logger.info("Retrying comparison with OpenRouter fallback")
-                    _llm_route_info["active_provider"] = "openrouter"
-                    comparison_store.add(ChatMessage(
-                        role="system",
-                        content="⚠️ 主模型调用失败，正在切换到 OpenRouter 备选模型...",
-                        msg_type="task_started",
-                    ))
-                    try:
-                        fallback_crew = build_comparison_crew(
-                            topic, style_conversations, llm=fallback_llm,
-                        )
-                        start_time = time.time()
-                        fallback_crew.kickoff()
-                        elapsed = time.time() - start_time
-                        logger.info(f"Fallback comparison completed in {elapsed:.1f}s")
-                        comparison_store.mark_done()
-                    except Exception as fallback_err:
-                        fallback_msg = f"{type(fallback_err).__name__}: {str(fallback_err)}"
-                        logger.error(f"Fallback comparison also failed: {fallback_msg}")
-                        comparison_store.mark_error(f"主模型: {error_msg}\nOpenRouter: {fallback_msg}")
-                else:
-                    comparison_store.mark_error(error_msg)
+                comparison_store.mark_error(error_msg)
             finally:
                 _active_store = None
 
@@ -548,17 +524,37 @@ def run_multi_style_simulation(
 # Background thread wrapper for multi-style simulation
 # ---------------------------------------------------------------------------
 
-_progress_info: dict[str, str] = {
-    "step": "0",
-    "total": "1",
-    "label": "准备中...",
-    "live": "等待任务启动",
-}
-_llm_route_info: dict[str, str] = {"active_provider": "primary"}
+if '_progress_info' not in globals():
+    _progress_info: dict[str, str] = {
+        "step": "0",
+        "total": "1",
+        "label": "准备中...",
+        "live": "等待任务启动",
+    }
+if '_llm_call_info' not in globals():
+    _llm_call_info: dict[str, str | int] = {
+        "status": "idle",
+        "call_count": 0,
+        "completed_count": 0,
+        "failed_count": 0,
+        "agent_role": "",
+        "model": "",
+        "call_started_at": "",
+    }
 
 
 def _run_in_thread(topic, num_rounds, selected_style_ids, style_stores, config):
     """Background thread entry point for multi-style simulation."""
+
+    _llm_call_info.update({
+        "status": "idle",
+        "call_count": 0,
+        "completed_count": 0,
+        "failed_count": 0,
+        "agent_role": "",
+        "model": "",
+        "call_started_at": "",
+    })
 
     def progress_callback(step, total, label):
         _progress_info["step"] = str(step + 1)
@@ -570,16 +566,16 @@ def _run_in_thread(topic, num_rounds, selected_style_ids, style_stores, config):
         run_multi_style_simulation(
             topic, num_rounds, selected_style_ids, style_stores, progress_callback, config
         )
+    except Exception as e:
+        logger.exception("Simulation thread crashed before completion")
+        error_msg = f"运行线程异常: {type(e).__name__}: {str(e)}"
+        _progress_info["live"] = error_msg
+        _progress_info["last_update"] = str(time.time())
+        for store in style_stores.values():
+            if not store.done:
+                store.mark_error(error_msg)
     finally:
         _progress_info["done"] = "true"
-
-
-def _format_llm_route_label() -> str:
-    """Return a human-readable current LLM route label."""
-    provider = _llm_route_info.get("active_provider", "primary")
-    if provider == "openrouter":
-        return "OpenRouter 备选模型"
-    return "主模型接口"
 
 
 # ---------------------------------------------------------------------------
@@ -638,24 +634,13 @@ def main():
 
         # Model status display
         st.subheader("模型配置")
-        available_llms = get_available_llms()
-        primary_model = os.getenv("OPENAI_MODEL_NAME", "未配置")
-        primary_base_url = os.getenv("OPENAI_BASE_URL", "未配置")
-        openrouter_model = os.getenv("OPENROUTER_MODEL_NAME", "")
-        openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
-        openrouter_in_available = any(label == "OpenRouter" for label, _ in available_llms)
+        primary_model = os.getenv("OPENAI_MODEL_NAME", "")
+        primary_base_url = os.getenv("OPENAI_BASE_URL", "")
+        primary_api_key = os.getenv("OPENAI_API_KEY", "")
 
-        st.caption(f"当前使用: **{_format_llm_route_label()}**")
-        st.caption(f"主接口: `{primary_base_url}`")
-        st.caption(f"主模型: **{primary_model}**")
-        if openrouter_key and openrouter_model and openrouter_in_available:
-            st.caption("备选接口: `https://openrouter.ai/api/v1`")
-            st.caption(f"备选模型: **OpenRouter/{openrouter_model}** ✅")
-        elif openrouter_key and openrouter_model:
-            st.caption(f"备选模型: **OpenRouter/{openrouter_model}** ⚠️ 已配置但当前环境不可用")
-        else:
-            st.caption("备选模型: 未配置 ❌")
-        if len(available_llms) == 0:
+        st.caption(f"接口: `{primary_base_url or '未配置'}`")
+        st.caption(f"模型: **{primary_model or '未配置'}**")
+        if not primary_api_key or not primary_model:
             st.warning("⚠️ 无可用模型，请检查 .env 配置")
 
         st.divider()
@@ -706,6 +691,8 @@ def main():
         st.session_state.max_iterations = 5
     if "context_window" not in st.session_state:
         st.session_state.context_window = 4
+    if "worker_thread" not in st.session_state:
+        st.session_state.worker_thread = None
 
     # -- Handle start button --
     if start_btn and not st.session_state.running and selected_styles:
@@ -739,7 +726,10 @@ def main():
         _progress_info["label"] = "初始化任务"
         _progress_info["live"] = "等待第一个角色开始"
         _progress_info["last_update"] = str(time.time())
-        _llm_route_info["active_provider"] = "primary"
+        _llm_call_info.update({
+            "status": "idle", "call_count": 0, "completed_count": 0,
+            "failed_count": 0, "agent_role": "", "model": "", "call_started_at": "",
+        })
 
         config = {
             "agent_timeout": agent_timeout,
@@ -753,6 +743,7 @@ def main():
             daemon=True,
         )
         thread.start()
+        st.session_state.worker_thread = thread
 
     # -- Main area: render based on state --
     style_stores = st.session_state.style_stores
@@ -772,14 +763,55 @@ def main():
             step = int(_progress_info.get("step", "0") or "0")
             total = max(int(_progress_info.get("total", "1") or "1"), 1)
             live = _progress_info.get("live", "等待任务启动")
+            last_update = float(_progress_info.get("last_update", "0") or "0")
             started_at = st.session_state.get("sim_started_at", time.time())
             elapsed = int(time.time() - started_at)
+            idle_seconds = int(time.time() - last_update) if last_update > 0 else elapsed
             progress_ratio = min(max(step / total, 0.0), 1.0)
+            worker = st.session_state.get("worker_thread")
+
+            # Guardrail: if worker thread has exited but stores are not done, fail fast with diagnostics.
+            if worker is not None and not worker.is_alive():
+                fail_msg = "后台执行线程已退出，任务未完成。请重试；若重复出现，请检查终端日志。"
+                for store in style_stores.values():
+                    if not store.done:
+                        store.mark_error(fail_msg)
+                st.session_state.running = False
+                st.error(f"❌ {fail_msg}")
+                st.rerun()
+
+            # Guardrail: no update for too long while still at initial phase usually means startup failure.
+            if step == 0 and idle_seconds > 45:
+                timeout_msg = f"启动超时：{idle_seconds}s 内未收到任务事件。请检查模型接口与日志。"
+                for store in style_stores.values():
+                    if not store.done:
+                        store.mark_error(timeout_msg)
+                st.session_state.running = False
+                st.error(f"❌ {timeout_msg}")
+                st.rerun()
+
             col1, col2 = st.columns([3, 1])
             with col1:
-                st.info(f"🔄 模拟进行中 — {label}")
+                llm_status = _llm_call_info.get("status", "idle")
+                call_count = int(_llm_call_info.get("call_count", 0))
+                completed_count = int(_llm_call_info.get("completed_count", 0))
+                failed_count = int(_llm_call_info.get("failed_count", 0))
+
+                if llm_status == "sending":
+                    call_started = float(_llm_call_info.get("call_started_at", 0) or 0)
+                    waiting_sec = int(time.time() - call_started) if call_started > 0 else 0
+                    st.warning(f"📡 模拟进行中 — {label}　|　正在等待 LLM 响应... ({waiting_sec}s)")
+                elif llm_status == "failed":
+                    st.error(f"⚠️ 模拟进行中 — {label}　|　上次请求失败，重试中...")
+                else:
+                    st.info(f"🔄 模拟进行中 — {label}")
+
                 st.progress(progress_ratio, text=f"阶段进度: {step}/{total}")
-                st.caption(f"已运行: {elapsed}s | 最近动作: {live}")
+                st.caption(
+                    f"已运行: {elapsed}s | LLM 调用: {completed_count}/{call_count} 完成"
+                    + (f" · {failed_count} 失败" if failed_count else "")
+                    + f" | {live}"
+                )
             with col2:
                 if st.button("🛑 取消模拟", type="secondary", use_container_width=True):
                     # Mark all stores as cancelled
@@ -788,7 +820,7 @@ def main():
                     st.session_state.running = False
                     st.warning("⚠️ 模拟已取消")
                     st.rerun()
-            time.sleep(1.5)
+            time.sleep(1.0)
             st.rerun()
 
         # All done — stop polling
