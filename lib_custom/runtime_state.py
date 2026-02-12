@@ -58,6 +58,8 @@ class RuntimeState:
 
     # Active message store pointer set by the background thread.
     active_store: ChatMessageStore | None = None
+    # Prefix to disambiguate messages from different styles (e.g. "transformational").
+    current_prefix: str = ""
 
     def snapshot_progress(self) -> dict[str, str]:
         with self.lock:
@@ -75,6 +77,14 @@ class RuntimeState:
         with self.lock:
             self.llm_call_info.update(updates)
 
+    def set_current_prefix(self, prefix: str) -> None:
+        with self.lock:
+            self.current_prefix = prefix
+
+    def get_current_prefix(self) -> str:
+        with self.lock:
+            return self.current_prefix
+
 
 STATE = RuntimeState()
 
@@ -90,43 +100,50 @@ def ensure_event_handlers_registered() -> None:
 
     @crewai_event_bus.on(AgentExecutionStartedEvent)
     def _on_agent_started(source, event: AgentExecutionStartedEvent):
-        store = STATE.active_store
-        if store is None:
+        if STATE.active_store is None:
             return
+        store = STATE.active_store
+        prefix = STATE.get_current_prefix()
+        task_id = str(getattr(event.task, "id", "") or "")
+        key = f"{prefix}:{task_id}" if task_id else None
         STATE.set_progress(
             live=f"{event.agent.role} 开始发言",
             last_update=str(time.time()),
         )
-        store.add(
-            ChatMessage(
+        # Create/refresh the message container so UI shows something immediately.
+        if key:
+            store.upsert(
+                key=key,
                 role=event.agent.role,
-                content=f"*{event.agent.role} 开始发言...*",
-                msg_type="started",
+                content="*正在生成...*",
+                msg_type="stream",
             )
-        )
+        else:
+            store.add(ChatMessage(role=event.agent.role, content=f"*{event.agent.role} 开始发言...*", msg_type="started"))
 
     @crewai_event_bus.on(AgentExecutionCompletedEvent)
     def _on_agent_completed(source, event: AgentExecutionCompletedEvent):
-        store = STATE.active_store
-        if store is None:
+        if STATE.active_store is None:
             return
+        store = STATE.active_store
+        prefix = STATE.get_current_prefix()
+        task_id = str(getattr(event.task, "id", "") or "")
+        key = f"{prefix}:{task_id}" if task_id else None
         STATE.set_progress(
             live=f"{event.agent.role} 发言完成",
             last_update=str(time.time()),
         )
-        store.add(
-            ChatMessage(
-                role=event.agent.role,
-                content=event.output,
-                msg_type="completed",
-            )
-        )
+        # Ensure final text is visible even if no stream chunks arrived.
+        if key:
+            store.upsert(key=key, role=event.agent.role, content=event.output, msg_type="completed")
+        else:
+            store.add(ChatMessage(role=event.agent.role, content=event.output, msg_type="completed"))
 
     @crewai_event_bus.on(TaskStartedEvent)
     def _on_task_started(source, event: TaskStartedEvent):
-        store = STATE.active_store
-        if store is None:
+        if STATE.active_store is None:
             return
+        store = STATE.active_store
         desc = ""
         if event.task and hasattr(event.task, "description"):
             desc = event.task.description[:80]
@@ -134,30 +151,18 @@ def ensure_event_handlers_registered() -> None:
             live=(f"任务开始: {desc}" if desc else "任务开始"),
             last_update=str(time.time()),
         )
-        store.add(
-            ChatMessage(
-                role="system",
-                content=f"📋 任务开始: {desc}...",
-                msg_type="task_started",
-            )
-        )
+        store.add(ChatMessage(role="system", content=f"📋 任务开始: {desc}...", msg_type="task_started"))
 
     @crewai_event_bus.on(TaskCompletedEvent)
     def _on_task_completed(source, event: TaskCompletedEvent):
-        store = STATE.active_store
-        if store is None:
+        if STATE.active_store is None:
             return
+        store = STATE.active_store
         STATE.set_progress(
             live="任务完成",
             last_update=str(time.time()),
         )
-        store.add(
-            ChatMessage(
-                role="system",
-                content="✅ 任务完成",
-                msg_type="task_completed",
-            )
-        )
+        store.add(ChatMessage(role="system", content="✅ 任务完成", msg_type="task_completed"))
 
     @crewai_event_bus.on(LLMCallStartedEvent)
     def _on_llm_call_started(source, event: LLMCallStartedEvent):

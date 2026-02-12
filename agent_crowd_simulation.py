@@ -20,6 +20,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 from crewai import Crew
+from crewai.types.streaming import CrewStreamingOutput, StreamChunkType
 
 from lib_custom.chat_store import ChatMessage, ChatMessageStore
 from lib_custom.crew_builder import CrewBuilder, build_comparison_crew
@@ -301,6 +302,8 @@ def run_multi_style_simulation(
     except Exception as e:
         raise RuntimeError(f"LLM 初始化失败: {type(e).__name__}: {e}") from e
 
+    stream_enabled = bool(config.get("stream", True))
+
     for idx, style_id in enumerate(selected_style_ids):
         style = LEADERSHIP_STYLES[style_id]
         store = style_stores[style_id]
@@ -319,14 +322,43 @@ def run_multi_style_simulation(
             )
             crew = builder.build_crew(topic, num_rounds)
             RUNTIME_STATE.active_store = store
+            RUNTIME_STATE.set_current_prefix(style_id)
             progress_callback(idx, total_steps, style.style_name)
             logger.info(f"Starting simulation for style: {style.style_name}")
             logger.info(f"Topic: {topic}, Rounds: {num_rounds}")
 
             # Run crew with timeout monitoring
             start_time = time.time()
-            crew.kickoff()
+            if stream_enabled:
+                streaming = crew.kickoff()
+                if isinstance(streaming, CrewStreamingOutput):
+                    buffers: dict[str, str] = {}
+                    for chunk in streaming:
+                        if store.cancelled:
+                            break
+                        if chunk.chunk_type != StreamChunkType.TEXT:
+                            # Tool call chunks can be shown in terminal logs; keep UI clean for now.
+                            continue
+                        if not chunk.content:
+                            continue
+                        msg_key = f"{style_id}:{chunk.task_id}" if chunk.task_id else f"{style_id}:{chunk.agent_id}:{chunk.task_index}"
+                        prev = buffers.get(msg_key, "")
+                        new = prev + chunk.content
+                        buffers[msg_key] = new
+                        store.upsert(key=msg_key, role=chunk.agent_role or "assistant", content=new, msg_type="stream")
+                        RUNTIME_STATE.set_progress(last_update=str(time.time()))
+                    # Ensure we can access the final result (may raise if cancelled mid-stream).
+                    try:
+                        _ = streaming.result
+                    except Exception:
+                        pass
+                else:
+                    # Fallback: non-streaming output
+                    crew.kickoff()
+            else:
+                crew.kickoff()
             elapsed = time.time() - start_time
+            store.finalize_streaming()
 
             logger.info(f"Simulation completed for {style.style_name} in {elapsed:.1f}s")
             store.mark_done()
@@ -337,6 +369,7 @@ def run_multi_style_simulation(
             store.mark_error(error_msg)
         finally:
             RUNTIME_STATE.active_store = None
+            RUNTIME_STATE.set_current_prefix("")
 
         style_conversations[style.style_name] = extract_conversation_text(
             store.get_all()
@@ -348,6 +381,7 @@ def run_multi_style_simulation(
         if comparison_store is not None:
             try:
                 RUNTIME_STATE.active_store = comparison_store
+                RUNTIME_STATE.set_current_prefix("__comparison__")
                 progress_callback(
                     len(selected_style_ids), total_steps, "跨风格对比分析"
                 )
@@ -356,11 +390,45 @@ def run_multi_style_simulation(
                     live="构建跨风格对比分析任务",
                     last_update=str(time.time()),
                 )
-                comparison_crew = build_comparison_crew(topic, style_conversations, llm=llm)
+                comparison_crew = build_comparison_crew(topic, style_conversations, llm=llm, stream=stream_enabled)
 
                 start_time = time.time()
-                comparison_crew.kickoff()
+                if stream_enabled:
+                    streaming = comparison_crew.kickoff()
+                    if isinstance(streaming, CrewStreamingOutput):
+                        buffers: dict[str, str] = {}
+                        for chunk in streaming:
+                            if comparison_store.cancelled:
+                                break
+                            if chunk.chunk_type != StreamChunkType.TEXT:
+                                continue
+                            if not chunk.content:
+                                continue
+                            msg_key = (
+                                f"__comparison__:{chunk.task_id}"
+                                if chunk.task_id
+                                else f"__comparison__:{chunk.agent_id}:{chunk.task_index}"
+                            )
+                            prev = buffers.get(msg_key, "")
+                            new = prev + chunk.content
+                            buffers[msg_key] = new
+                            comparison_store.upsert(
+                                key=msg_key,
+                                role=chunk.agent_role or "跨风格对比分析师",
+                                content=new,
+                                msg_type="stream",
+                            )
+                            RUNTIME_STATE.set_progress(last_update=str(time.time()))
+                        try:
+                            _ = streaming.result
+                        except Exception:
+                            pass
+                    else:
+                        comparison_crew.kickoff()
+                else:
+                    comparison_crew.kickoff()
                 elapsed = time.time() - start_time
+                comparison_store.finalize_streaming()
 
                 logger.info(f"Comparison analysis completed in {elapsed:.1f}s")
                 comparison_store.mark_done()
@@ -371,6 +439,7 @@ def run_multi_style_simulation(
                 comparison_store.mark_error(error_msg)
             finally:
                 RUNTIME_STATE.active_store = None
+                RUNTIME_STATE.set_current_prefix("")
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +510,11 @@ def main():
         )
 
         with st.expander("🔧 高级设置", expanded=False):
+            stream_output = st.checkbox(
+                "流式输出（推荐）",
+                value=True,
+                help="开启后，LLM 的输出会在前端逐字显示，等待体验更好；关闭后只在完成时一次性显示。",
+            )
             agent_timeout = st.slider(
                 "Agent超时时间（秒）",
                 min_value=30,
@@ -526,6 +600,8 @@ def main():
         st.session_state.max_iterations = 5
     if "context_window" not in st.session_state:
         st.session_state.context_window = 4
+    if "stream_output" not in st.session_state:
+        st.session_state.stream_output = True
     if "worker_thread" not in st.session_state:
         st.session_state.worker_thread = None
 
@@ -552,6 +628,7 @@ def main():
         st.session_state.agent_timeout = agent_timeout
         st.session_state.max_iterations = max_iterations
         st.session_state.context_window = context_window
+        st.session_state.stream_output = stream_output
         st.session_state.sim_started_at = time.time()
 
         total_steps = len(selected_styles) + (1 if len(selected_styles) > 1 else 0)
@@ -576,6 +653,7 @@ def main():
             "agent_timeout": agent_timeout,
             "max_iterations": max_iterations,
             "context_window": context_window,
+            "stream": stream_output,
         }
 
         thread = threading.Thread(
@@ -663,6 +741,9 @@ def main():
                     st.session_state.running = False
                     st.warning("⚠️ 模拟已取消")
                     st.rerun()
+
+            # Stream partial outputs while running (tabs update on each rerun).
+            _render_results_tabs(style_stores, style_ids)
             time.sleep(1.0)
             st.rerun()
 

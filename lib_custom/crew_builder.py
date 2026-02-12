@@ -137,6 +137,7 @@ class CrewBuilder:
             process=Process.sequential,
             verbose=False,
             max_rpm=10,  # Limit requests per minute
+            stream=bool(self.config.get("stream", True)),
         )
 
     @staticmethod
@@ -218,6 +219,7 @@ def build_comparison_crew(
     topic: str,
     style_conversations: dict[str, str],
     llm: LLM | None = None,
+    stream: bool = True,
 ) -> Crew:
     """Build a crew for cross-style comparison analysis.
 
@@ -265,4 +267,5 @@ def build_comparison_crew(
         process=Process.sequential,
         verbose=False,
         max_rpm=10,
+        stream=stream,
     )
