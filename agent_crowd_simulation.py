@@ -9,8 +9,8 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -66,11 +66,35 @@ def validate_api_endpoint() -> tuple[bool, str]:
     # Check if it's a local proxy
     if "127.0.0.1" in base_url or "localhost" in base_url:
         try:
-            # Try to connect with a short timeout
-            test_url = base_url.replace("/v1", "")
-            with urlopen(test_url, timeout=3) as response:
+            # Use an authenticated OpenAI-compatible endpoint to validate both connectivity and auth.
+            test_url = base_url.rstrip("/") + "/models"
+            req = Request(
+                test_url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                },
+            )
+            with urlopen(req, timeout=5) as response:
                 response.read()
             return True, ""
+        except HTTPError as e:
+            if e.code == 401:
+                return (
+                    False,
+                    f"❌ 本地代理鉴权失败 (401 Unauthorized): {base_url}\n"
+                    "请检查 OPENAI_API_KEY 是否正确，或代理是否需要不同的密钥格式。",
+                )
+            if e.code == 403:
+                return (
+                    False,
+                    f"❌ 本地代理无权限访问 (403 Forbidden): {base_url}\n"
+                    "请检查 API Key 权限或代理访问控制配置。",
+                )
+            return (
+                False,
+                f"❌ 本地代理返回 HTTP {e.code}: {base_url}\n"
+                f"错误: {e.reason}",
+            )
         except URLError as e:
             return False, f"❌ 无法连接到本地代理: {base_url}\n请确保代理服务正在运行\n错误: {e.reason}"
         except TimeoutError:
@@ -430,6 +454,7 @@ def run_multi_style_simulation(
             fallback_llm = create_openrouter_llm()
             if fallback_llm is not None:
                 logger.info(f"Retrying {style.style_name} with OpenRouter fallback")
+                _llm_route_info["active_provider"] = "openrouter"
                 store.add(ChatMessage(
                     role="system",
                     content="⚠️ 主模型调用失败，正在切换到 OpenRouter 备选模型...",
@@ -486,6 +511,7 @@ def run_multi_style_simulation(
                 fallback_llm = create_openrouter_llm()
                 if fallback_llm is not None:
                     logger.info("Retrying comparison with OpenRouter fallback")
+                    _llm_route_info["active_provider"] = "openrouter"
                     comparison_store.add(ChatMessage(
                         role="system",
                         content="⚠️ 主模型调用失败，正在切换到 OpenRouter 备选模型...",
@@ -515,6 +541,7 @@ def run_multi_style_simulation(
 # ---------------------------------------------------------------------------
 
 _progress_info: dict[str, str] = {}
+_llm_route_info: dict[str, str] = {"active_provider": "primary"}
 
 
 def _run_in_thread(topic, num_rounds, selected_style_ids, style_stores, config):
@@ -531,6 +558,14 @@ def _run_in_thread(topic, num_rounds, selected_style_ids, style_stores, config):
         )
     finally:
         _progress_info["done"] = "true"
+
+
+def _format_llm_route_label() -> str:
+    """Return a human-readable current LLM route label."""
+    provider = _llm_route_info.get("active_provider", "primary")
+    if provider == "openrouter":
+        return "OpenRouter 备选模型"
+    return "主模型接口"
 
 
 # ---------------------------------------------------------------------------
@@ -591,12 +626,19 @@ def main():
         st.subheader("模型配置")
         available_llms = get_available_llms()
         primary_model = os.getenv("OPENAI_MODEL_NAME", "未配置")
+        primary_base_url = os.getenv("OPENAI_BASE_URL", "未配置")
         openrouter_model = os.getenv("OPENROUTER_MODEL_NAME", "")
         openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+        openrouter_in_available = any(label == "OpenRouter" for label, _ in available_llms)
 
+        st.caption(f"当前使用: **{_format_llm_route_label()}**")
+        st.caption(f"主接口: `{primary_base_url}`")
         st.caption(f"主模型: **{primary_model}**")
-        if openrouter_key and openrouter_model:
+        if openrouter_key and openrouter_model and openrouter_in_available:
+            st.caption("备选接口: `https://openrouter.ai/api/v1`")
             st.caption(f"备选模型: **OpenRouter/{openrouter_model}** ✅")
+        elif openrouter_key and openrouter_model:
+            st.caption(f"备选模型: **OpenRouter/{openrouter_model}** ⚠️ 已配置但当前环境不可用")
         else:
             st.caption("备选模型: 未配置 ❌")
         if len(available_llms) == 0:
@@ -676,6 +718,7 @@ def main():
         st.session_state.context_window = context_window
 
         _progress_info.clear()
+        _llm_route_info["active_provider"] = "primary"
 
         config = {
             "agent_timeout": agent_timeout,

@@ -83,6 +83,15 @@ class TestCreateOpenrouterLlm:
             api_key="or-test-key",
         )
 
+    @patch("lib_custom.llm_config.LLM", side_effect=ImportError("Fallback to LiteLLM is not available"))
+    @patch.dict(os.environ, {
+        "OPENROUTER_API_KEY": "or-test-key",
+        "OPENROUTER_MODEL_NAME": "openai/gpt-4o",
+    })
+    def test_returns_none_when_litellm_fallback_unavailable(self, _mock_llm):
+        result = create_openrouter_llm()
+        assert result is None
+
     @patch.dict(os.environ, {}, clear=True)
     def test_returns_none_when_not_configured(self):
         result = create_openrouter_llm()

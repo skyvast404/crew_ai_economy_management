@@ -58,11 +58,15 @@ def create_openrouter_llm() -> LLM | None:
     full_model = f"openrouter/{model_name}" if not model_name.startswith("openrouter/") else model_name
 
     logger.info("OpenRouter fallback LLM: model=%s", full_model)
-    return LLM(
-        model=full_model,
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
-    )
+    try:
+        return LLM(
+            model=full_model,
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key,
+        )
+    except ImportError as e:
+        logger.warning("OpenRouter fallback unavailable: %s", e)
+        return None
 
 
 def get_available_llms() -> list[tuple[str, LLM]]:
