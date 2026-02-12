@@ -1,6 +1,6 @@
 """Crew builder for creating agents and tasks from role configurations."""
 
-from crewai import Agent, Crew, Process, Task
+from crewai import Agent, Crew, LLM, Process, Task
 
 from lib_custom.leadership_styles import DEFAULT_COMPARISON_ANALYST_PROMPT
 from lib_custom.role_models import RoleConfig, RolesDatabase
@@ -9,26 +9,35 @@ from lib_custom.role_models import RoleConfig, RolesDatabase
 class CrewBuilder:
     """Builds CrewAI agents and tasks from role configurations."""
 
-    def __init__(self, roles_db: RolesDatabase, config: dict | None = None):
-        """Initialize with roles database and optional configuration."""
+    def __init__(
+        self,
+        roles_db: RolesDatabase,
+        config: dict | None = None,
+        llm: LLM | None = None,
+    ):
+        """Initialize with roles database, optional configuration, and optional LLM."""
         self.roles_db = roles_db
         self.config = config or {
             "agent_timeout": 120,
             "max_iterations": 5,
             "context_window": 4,
         }
+        self.llm = llm
 
     def build_agent(self, role_config: RoleConfig) -> Agent:
         """Create an Agent from RoleConfig."""
-        return Agent(
-            role=role_config.role_name,
-            goal=role_config.goal,
-            backstory=role_config.backstory,
-            verbose=False,
-            allow_delegation=False,
-            max_iter=self.config["max_iterations"],
-            max_execution_time=self.config["agent_timeout"],
-        )
+        kwargs: dict = {
+            "role": role_config.role_name,
+            "goal": role_config.goal,
+            "backstory": role_config.backstory,
+            "verbose": False,
+            "allow_delegation": False,
+            "max_iter": self.config["max_iterations"],
+            "max_execution_time": self.config["agent_timeout"],
+        }
+        if self.llm is not None:
+            kwargs["llm"] = self.llm
+        return Agent(**kwargs)
 
     def create_conversation_task(
         self,
@@ -206,13 +215,16 @@ class CrewBuilder:
 
 
 def build_comparison_crew(
-    topic: str, style_conversations: dict[str, str]
+    topic: str,
+    style_conversations: dict[str, str],
+    llm: LLM | None = None,
 ) -> Crew:
     """Build a crew for cross-style comparison analysis.
 
     Args:
         topic: The discussion topic.
         style_conversations: Mapping of style_name -> conversation text.
+        llm: Optional LLM override for the comparison agent.
 
     Returns:
         A Crew with a single comparison analyst agent and task.
@@ -228,15 +240,18 @@ def build_comparison_crew(
         style_conversations=combined,
     )
 
-    agent = Agent(
-        role="跨风格对比分析师",
-        goal="对比分析不同领导风格下的团队互动差异",
-        backstory="你是资深组织行为学研究者，擅长跨条件对比分析和领导力研究。",
-        verbose=False,
-        allow_delegation=False,
-        max_iter=5,
-        max_execution_time=120,
-    )
+    agent_kwargs: dict = {
+        "role": "跨风格对比分析师",
+        "goal": "对比分析不同领导风格下的团队互动差异",
+        "backstory": "你是资深组织行为学研究者，擅长跨条件对比分析和领导力研究。",
+        "verbose": False,
+        "allow_delegation": False,
+        "max_iter": 5,
+        "max_execution_time": 120,
+    }
+    if llm is not None:
+        agent_kwargs["llm"] = llm
+    agent = Agent(**agent_kwargs)
 
     task = Task(
         description=description,

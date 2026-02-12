@@ -30,6 +30,7 @@ from crewai.events.types.task_events import TaskCompletedEvent, TaskStartedEvent
 
 from lib_custom.crew_builder import CrewBuilder, build_comparison_crew
 from lib_custom.leadership_styles import LEADERSHIP_STYLES, apply_style_to_roles
+from lib_custom.llm_config import create_openrouter_llm, get_available_llms
 from lib_custom.role_repository import RoleRepository
 
 
@@ -424,7 +425,35 @@ def run_multi_style_simulation(
         except Exception as e:
             error_msg = f"{type(e).__name__}: {str(e)}"
             logger.error(f"Simulation failed for {style.style_name}: {error_msg}")
-            store.mark_error(error_msg)
+
+            # Attempt fallback with OpenRouter
+            fallback_llm = create_openrouter_llm()
+            if fallback_llm is not None:
+                logger.info(f"Retrying {style.style_name} with OpenRouter fallback")
+                store.add(ChatMessage(
+                    role="system",
+                    content="⚠️ 主模型调用失败，正在切换到 OpenRouter 备选模型...",
+                    msg_type="task_started",
+                ))
+                try:
+                    fallback_builder = CrewBuilder(styled_db, config, llm=fallback_llm)
+                    fallback_crew = fallback_builder.build_crew(topic, num_rounds)
+                    start_time = time.time()
+                    fallback_crew.kickoff()
+                    elapsed = time.time() - start_time
+                    logger.info(f"Fallback completed for {style.style_name} in {elapsed:.1f}s")
+                    store.add(ChatMessage(
+                        role="system",
+                        content="✅ OpenRouter 备选模型完成模拟",
+                        msg_type="task_completed",
+                    ))
+                    store.mark_done()
+                except Exception as fallback_err:
+                    fallback_msg = f"{type(fallback_err).__name__}: {str(fallback_err)}"
+                    logger.error(f"Fallback also failed for {style.style_name}: {fallback_msg}")
+                    store.mark_error(f"主模型: {error_msg}\nOpenRouter: {fallback_msg}")
+            else:
+                store.mark_error(error_msg)
         finally:
             _active_store = None
 
@@ -453,7 +482,30 @@ def run_multi_style_simulation(
             except Exception as e:
                 error_msg = f"{type(e).__name__}: {str(e)}"
                 logger.error(f"Comparison analysis failed: {error_msg}")
-                comparison_store.mark_error(error_msg)
+
+                fallback_llm = create_openrouter_llm()
+                if fallback_llm is not None:
+                    logger.info("Retrying comparison with OpenRouter fallback")
+                    comparison_store.add(ChatMessage(
+                        role="system",
+                        content="⚠️ 主模型调用失败，正在切换到 OpenRouter 备选模型...",
+                        msg_type="task_started",
+                    ))
+                    try:
+                        fallback_crew = build_comparison_crew(
+                            topic, style_conversations, llm=fallback_llm,
+                        )
+                        start_time = time.time()
+                        fallback_crew.kickoff()
+                        elapsed = time.time() - start_time
+                        logger.info(f"Fallback comparison completed in {elapsed:.1f}s")
+                        comparison_store.mark_done()
+                    except Exception as fallback_err:
+                        fallback_msg = f"{type(fallback_err).__name__}: {str(fallback_err)}"
+                        logger.error(f"Fallback comparison also failed: {fallback_msg}")
+                        comparison_store.mark_error(f"主模型: {error_msg}\nOpenRouter: {fallback_msg}")
+                else:
+                    comparison_store.mark_error(error_msg)
             finally:
                 _active_store = None
 
@@ -532,6 +584,23 @@ def main():
                 step=2,
                 help="每个Agent能看到的历史任务数量，越大消耗越多token",
             )
+
+        st.divider()
+
+        # Model status display
+        st.subheader("模型配置")
+        available_llms = get_available_llms()
+        primary_model = os.getenv("OPENAI_MODEL_NAME", "未配置")
+        openrouter_model = os.getenv("OPENROUTER_MODEL_NAME", "")
+        openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+
+        st.caption(f"主模型: **{primary_model}**")
+        if openrouter_key and openrouter_model:
+            st.caption(f"备选模型: **OpenRouter/{openrouter_model}** ✅")
+        else:
+            st.caption("备选模型: 未配置 ❌")
+        if len(available_llms) == 0:
+            st.warning("⚠️ 无可用模型，请检查 .env 配置")
 
         st.divider()
         st.subheader("领导风格选择")
