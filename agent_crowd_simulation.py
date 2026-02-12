@@ -181,6 +181,8 @@ _active_store: ChatMessageStore | None = None
 def _on_agent_started(source, event: AgentExecutionStartedEvent):
     store = _active_store
     if store is not None:
+        _progress_info["live"] = f"{event.agent.role} 开始发言"
+        _progress_info["last_update"] = str(time.time())
         store.add(ChatMessage(
             role=event.agent.role,
             content=f"*{event.agent.role} 开始发言...*",
@@ -192,6 +194,8 @@ def _on_agent_started(source, event: AgentExecutionStartedEvent):
 def _on_agent_completed(source, event: AgentExecutionCompletedEvent):
     store = _active_store
     if store is not None:
+        _progress_info["live"] = f"{event.agent.role} 发言完成"
+        _progress_info["last_update"] = str(time.time())
         store.add(ChatMessage(
             role=event.agent.role,
             content=event.output,
@@ -206,6 +210,8 @@ def _on_task_started(source, event: TaskStartedEvent):
         desc = ""
         if event.task and hasattr(event.task, "description"):
             desc = event.task.description[:80]
+        _progress_info["live"] = f"任务开始: {desc}" if desc else "任务开始"
+        _progress_info["last_update"] = str(time.time())
         store.add(ChatMessage(
             role="system",
             content=f"📋 任务开始: {desc}...",
@@ -217,6 +223,8 @@ def _on_task_started(source, event: TaskStartedEvent):
 def _on_task_completed(source, event: TaskCompletedEvent):
     store = _active_store
     if store is not None:
+        _progress_info["live"] = "任务完成"
+        _progress_info["last_update"] = str(time.time())
         store.add(ChatMessage(
             role="system",
             content="✅ 任务完成",
@@ -540,7 +548,12 @@ def run_multi_style_simulation(
 # Background thread wrapper for multi-style simulation
 # ---------------------------------------------------------------------------
 
-_progress_info: dict[str, str] = {}
+_progress_info: dict[str, str] = {
+    "step": "0",
+    "total": "1",
+    "label": "准备中...",
+    "live": "等待任务启动",
+}
 _llm_route_info: dict[str, str] = {"active_provider": "primary"}
 
 
@@ -548,9 +561,10 @@ def _run_in_thread(topic, num_rounds, selected_style_ids, style_stores, config):
     """Background thread entry point for multi-style simulation."""
 
     def progress_callback(step, total, label):
-        _progress_info["step"] = str(step)
+        _progress_info["step"] = str(step + 1)
         _progress_info["total"] = str(total)
         _progress_info["label"] = label
+        _progress_info["last_update"] = str(time.time())
 
     try:
         run_multi_style_simulation(
@@ -716,8 +730,15 @@ def main():
         st.session_state.agent_timeout = agent_timeout
         st.session_state.max_iterations = max_iterations
         st.session_state.context_window = context_window
+        st.session_state.sim_started_at = time.time()
 
         _progress_info.clear()
+        total_steps = len(selected_styles) + (1 if len(selected_styles) > 1 else 0)
+        _progress_info["step"] = "0"
+        _progress_info["total"] = str(max(total_steps, 1))
+        _progress_info["label"] = "初始化任务"
+        _progress_info["live"] = "等待第一个角色开始"
+        _progress_info["last_update"] = str(time.time())
         _llm_route_info["active_provider"] = "primary"
 
         config = {
@@ -748,9 +769,17 @@ def main():
 
         if not (all_done and comparison_done):
             label = _progress_info.get("label", "准备中...")
+            step = int(_progress_info.get("step", "0") or "0")
+            total = max(int(_progress_info.get("total", "1") or "1"), 1)
+            live = _progress_info.get("live", "等待任务启动")
+            started_at = st.session_state.get("sim_started_at", time.time())
+            elapsed = int(time.time() - started_at)
+            progress_ratio = min(max(step / total, 0.0), 1.0)
             col1, col2 = st.columns([3, 1])
             with col1:
                 st.info(f"🔄 模拟进行中 — {label}")
+                st.progress(progress_ratio, text=f"阶段进度: {step}/{total}")
+                st.caption(f"已运行: {elapsed}s | 最近动作: {live}")
             with col2:
                 if st.button("🛑 取消模拟", type="secondary", use_container_width=True):
                     # Mark all stores as cancelled
