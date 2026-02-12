@@ -8,7 +8,6 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass, field
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -21,21 +20,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 from crewai import Crew
-from crewai.events.event_bus import crewai_event_bus
-from crewai.events.types.agent_events import (
-    AgentExecutionCompletedEvent,
-    AgentExecutionStartedEvent,
-)
-from crewai.events.types.llm_events import (
-    LLMCallCompletedEvent,
-    LLMCallFailedEvent,
-    LLMCallStartedEvent,
-)
-from crewai.events.types.task_events import TaskCompletedEvent, TaskStartedEvent
 
+from lib_custom.chat_store import ChatMessage, ChatMessageStore
 from lib_custom.crew_builder import CrewBuilder, build_comparison_crew
 from lib_custom.leadership_styles import LEADERSHIP_STYLES, apply_style_to_roles
+from lib_custom.llm_config import create_primary_llm
 from lib_custom.role_repository import RoleRepository
+from lib_custom.runtime_state import STATE as RUNTIME_STATE
+from lib_custom.runtime_state import ensure_event_handlers_registered
 
 
 # ---------------------------------------------------------------------------
@@ -103,161 +95,7 @@ def validate_api_endpoint() -> tuple[bool, str]:
         return False, f"❌ 连接错误: {str(e)}"
 
 
-# ---------------------------------------------------------------------------
-# Message store: thread-safe shared state between crew thread and Streamlit
-# ---------------------------------------------------------------------------
-
-@dataclass
-class ChatMessage:
-    role: str
-    content: str
-    msg_type: str
-    timestamp: float = field(default_factory=time.time)
-
-
-class ChatMessageStore:
-    """Thread-safe container for chat messages shared between threads."""
-
-    def __init__(self):
-        self._messages: list[ChatMessage] = []
-        self._lock = threading.Lock()
-        self._done = False
-        self._error: str | None = None
-        self._cancelled = False
-
-    def add(self, msg: ChatMessage):
-        with self._lock:
-            self._messages = [*self._messages, msg]
-
-    def get_all(self) -> list[ChatMessage]:
-        with self._lock:
-            return list(self._messages)
-
-    def mark_done(self):
-        with self._lock:
-            self._done = True
-
-    def mark_error(self, error: str):
-        with self._lock:
-            self._error = error
-            self._done = True
-
-    def mark_cancelled(self):
-        with self._lock:
-            self._cancelled = True
-            self._done = True
-
-    @property
-    def done(self) -> bool:
-        with self._lock:
-            return self._done
-
-    @property
-    def error(self) -> str | None:
-        with self._lock:
-            return self._error
-
-    @property
-    def cancelled(self) -> bool:
-        with self._lock:
-            return self._cancelled
-
-
-# ---------------------------------------------------------------------------
-# Module-level active store pointer — handlers write here (registered once)
-# ---------------------------------------------------------------------------
-
-if '_active_store' not in globals():
-    _active_store: ChatMessageStore | None = None
-
-
-# ---------------------------------------------------------------------------
-# Register event handlers ONCE at module level (singleton event bus)
-# Guard prevents duplicate registration on Streamlit rerun.
-# ---------------------------------------------------------------------------
-
-if '_handlers_registered' not in globals():
-    _handlers_registered = True
-
-    @crewai_event_bus.on(AgentExecutionStartedEvent)
-    def _on_agent_started(source, event: AgentExecutionStartedEvent):
-        store = _active_store
-        if store is not None:
-            _progress_info["live"] = f"{event.agent.role} 开始发言"
-            _progress_info["last_update"] = str(time.time())
-            store.add(ChatMessage(
-                role=event.agent.role,
-                content=f"*{event.agent.role} 开始发言...*",
-                msg_type="started",
-            ))
-
-    @crewai_event_bus.on(AgentExecutionCompletedEvent)
-    def _on_agent_completed(source, event: AgentExecutionCompletedEvent):
-        store = _active_store
-        if store is not None:
-            _progress_info["live"] = f"{event.agent.role} 发言完成"
-            _progress_info["last_update"] = str(time.time())
-            store.add(ChatMessage(
-                role=event.agent.role,
-                content=event.output,
-                msg_type="completed",
-            ))
-
-    @crewai_event_bus.on(TaskStartedEvent)
-    def _on_task_started(source, event: TaskStartedEvent):
-        store = _active_store
-        if store is not None:
-            desc = ""
-            if event.task and hasattr(event.task, "description"):
-                desc = event.task.description[:80]
-            _progress_info["live"] = f"任务开始: {desc}" if desc else "任务开始"
-            _progress_info["last_update"] = str(time.time())
-            store.add(ChatMessage(
-                role="system",
-                content=f"📋 任务开始: {desc}...",
-                msg_type="task_started",
-            ))
-
-    @crewai_event_bus.on(TaskCompletedEvent)
-    def _on_task_completed(source, event: TaskCompletedEvent):
-        store = _active_store
-        if store is not None:
-            _progress_info["live"] = "任务完成"
-            _progress_info["last_update"] = str(time.time())
-            store.add(ChatMessage(
-                role="system",
-                content="✅ 任务完成",
-                msg_type="task_completed",
-            ))
-
-    @crewai_event_bus.on(LLMCallStartedEvent)
-    def _on_llm_call_started(source, event: LLMCallStartedEvent):
-        _llm_call_info["status"] = "sending"
-        _llm_call_info["call_count"] = int(_llm_call_info.get("call_count", 0)) + 1
-        _llm_call_info["agent_role"] = getattr(event, "agent_role", "") or ""
-        _llm_call_info["model"] = getattr(event, "model", "") or ""
-        _llm_call_info["call_started_at"] = str(time.time())
-        _progress_info["live"] = f"📡 发送请求... ({_llm_call_info['agent_role'] or 'LLM'})"
-        _progress_info["last_update"] = str(time.time())
-
-    @crewai_event_bus.on(LLMCallCompletedEvent)
-    def _on_llm_call_completed(source, event: LLMCallCompletedEvent):
-        _llm_call_info["status"] = "completed"
-        _llm_call_info["completed_count"] = int(_llm_call_info.get("completed_count", 0)) + 1
-        duration = ""
-        started = float(_llm_call_info.get("call_started_at", 0) or 0)
-        if started > 0:
-            duration = f" ({time.time() - started:.1f}s)"
-        _progress_info["live"] = f"✅ 收到响应{duration}"
-        _progress_info["last_update"] = str(time.time())
-
-    @crewai_event_bus.on(LLMCallFailedEvent)
-    def _on_llm_call_failed(source, event: LLMCallFailedEvent):
-        _llm_call_info["status"] = "failed"
-        _llm_call_info["failed_count"] = int(_llm_call_info.get("failed_count", 0)) + 1
-        error_preview = str(event.error)[:60]
-        _progress_info["live"] = f"❌ 请求失败: {error_preview}"
-        _progress_info["last_update"] = str(time.time())
+ensure_event_handlers_registered()
 
 
 # ---------------------------------------------------------------------------
@@ -450,11 +288,18 @@ def run_multi_style_simulation(
 
     Populates style_stores with messages for each style, then runs comparison.
     """
-    global _active_store
     repo = RoleRepository()
     base_db = repo.load_roles()
     total_steps = len(selected_style_ids) + (1 if len(selected_style_ids) > 1 else 0)
     style_conversations: dict[str, str] = {}
+
+    # Bind to the same OpenAI-compatible endpoint/model shown in the sidebar.
+    # Without this, CrewAI may fall back to a default provider/config and hang
+    # before emitting any task events (UI then shows "启动超时").
+    try:
+        llm = create_primary_llm()
+    except Exception as e:
+        raise RuntimeError(f"LLM 初始化失败: {type(e).__name__}: {e}") from e
 
     for idx, style_id in enumerate(selected_style_ids):
         style = LEADERSHIP_STYLES[style_id]
@@ -467,9 +312,13 @@ def run_multi_style_simulation(
 
         try:
             styled_db = apply_style_to_roles(base_db, style)
-            builder = CrewBuilder(styled_db, config)
+            builder = CrewBuilder(styled_db, config, llm=llm)
+            RUNTIME_STATE.set_progress(
+                live=f"构建任务与角色: {style.style_name}",
+                last_update=str(time.time()),
+            )
             crew = builder.build_crew(topic, num_rounds)
-            _active_store = store
+            RUNTIME_STATE.active_store = store
             progress_callback(idx, total_steps, style.style_name)
             logger.info(f"Starting simulation for style: {style.style_name}")
             logger.info(f"Topic: {topic}, Rounds: {num_rounds}")
@@ -487,7 +336,7 @@ def run_multi_style_simulation(
 
             store.mark_error(error_msg)
         finally:
-            _active_store = None
+            RUNTIME_STATE.active_store = None
 
         style_conversations[style.style_name] = extract_conversation_text(
             store.get_all()
@@ -498,12 +347,16 @@ def run_multi_style_simulation(
         comparison_store = style_stores.get("__comparison__")
         if comparison_store is not None:
             try:
-                _active_store = comparison_store
+                RUNTIME_STATE.active_store = comparison_store
                 progress_callback(
                     len(selected_style_ids), total_steps, "跨风格对比分析"
                 )
                 logger.info("Starting cross-style comparison analysis")
-                comparison_crew = build_comparison_crew(topic, style_conversations)
+                RUNTIME_STATE.set_progress(
+                    live="构建跨风格对比分析任务",
+                    last_update=str(time.time()),
+                )
+                comparison_crew = build_comparison_crew(topic, style_conversations, llm=llm)
 
                 start_time = time.time()
                 comparison_crew.kickoff()
@@ -517,50 +370,33 @@ def run_multi_style_simulation(
 
                 comparison_store.mark_error(error_msg)
             finally:
-                _active_store = None
+                RUNTIME_STATE.active_store = None
 
 
 # ---------------------------------------------------------------------------
 # Background thread wrapper for multi-style simulation
 # ---------------------------------------------------------------------------
 
-if '_progress_info' not in globals():
-    _progress_info: dict[str, str] = {
-        "step": "0",
-        "total": "1",
-        "label": "准备中...",
-        "live": "等待任务启动",
-    }
-if '_llm_call_info' not in globals():
-    _llm_call_info: dict[str, str | int] = {
-        "status": "idle",
-        "call_count": 0,
-        "completed_count": 0,
-        "failed_count": 0,
-        "agent_role": "",
-        "model": "",
-        "call_started_at": "",
-    }
-
-
 def _run_in_thread(topic, num_rounds, selected_style_ids, style_stores, config):
     """Background thread entry point for multi-style simulation."""
 
-    _llm_call_info.update({
-        "status": "idle",
-        "call_count": 0,
-        "completed_count": 0,
-        "failed_count": 0,
-        "agent_role": "",
-        "model": "",
-        "call_started_at": "",
-    })
+    RUNTIME_STATE.set_llm(
+        status="idle",
+        call_count=0,
+        completed_count=0,
+        failed_count=0,
+        agent_role="",
+        model="",
+        call_started_at="",
+    )
 
     def progress_callback(step, total, label):
-        _progress_info["step"] = str(step + 1)
-        _progress_info["total"] = str(total)
-        _progress_info["label"] = label
-        _progress_info["last_update"] = str(time.time())
+        RUNTIME_STATE.set_progress(
+            step=str(step + 1),
+            total=str(total),
+            label=label,
+            last_update=str(time.time()),
+        )
 
     try:
         run_multi_style_simulation(
@@ -569,13 +405,12 @@ def _run_in_thread(topic, num_rounds, selected_style_ids, style_stores, config):
     except Exception as e:
         logger.exception("Simulation thread crashed before completion")
         error_msg = f"运行线程异常: {type(e).__name__}: {str(e)}"
-        _progress_info["live"] = error_msg
-        _progress_info["last_update"] = str(time.time())
+        RUNTIME_STATE.set_progress(live=error_msg, last_update=str(time.time()))
         for store in style_stores.values():
             if not store.done:
                 store.mark_error(error_msg)
     finally:
-        _progress_info["done"] = "true"
+        RUNTIME_STATE.set_progress(done="true", last_update=str(time.time()))
 
 
 # ---------------------------------------------------------------------------
@@ -719,17 +554,23 @@ def main():
         st.session_state.context_window = context_window
         st.session_state.sim_started_at = time.time()
 
-        _progress_info.clear()
         total_steps = len(selected_styles) + (1 if len(selected_styles) > 1 else 0)
-        _progress_info["step"] = "0"
-        _progress_info["total"] = str(max(total_steps, 1))
-        _progress_info["label"] = "初始化任务"
-        _progress_info["live"] = "等待第一个角色开始"
-        _progress_info["last_update"] = str(time.time())
-        _llm_call_info.update({
-            "status": "idle", "call_count": 0, "completed_count": 0,
-            "failed_count": 0, "agent_role": "", "model": "", "call_started_at": "",
-        })
+        RUNTIME_STATE.set_progress(
+            step="0",
+            total=str(max(total_steps, 1)),
+            label="初始化任务",
+            live="等待第一个角色开始",
+            last_update=str(time.time()),
+        )
+        RUNTIME_STATE.set_llm(
+            status="idle",
+            call_count=0,
+            completed_count=0,
+            failed_count=0,
+            agent_role="",
+            model="",
+            call_started_at="",
+        )
 
         config = {
             "agent_timeout": agent_timeout,
@@ -759,6 +600,8 @@ def main():
         comparison_done = comparison_store.done if comparison_store else True
 
         if not (all_done and comparison_done):
+            _progress_info = RUNTIME_STATE.snapshot_progress()
+            _llm_call_info = RUNTIME_STATE.snapshot_llm()
             label = _progress_info.get("label", "准备中...")
             step = int(_progress_info.get("step", "0") or "0")
             total = max(int(_progress_info.get("total", "1") or "1"), 1)
