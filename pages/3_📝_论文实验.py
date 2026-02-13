@@ -82,6 +82,27 @@ def _render_partial_messages(store: ChatMessageStore):
         st.markdown(f"**{msg.role}**: {preview}")
 
 
+def _render_full_messages(store: ChatMessageStore):
+    """Render all messages from a store in a scrollable container."""
+    messages = store.get_all()
+    completed = [
+        m for m in messages if m.msg_type == "completed" and m.role != "system"
+    ]
+    if not completed:
+        if store.error:
+            st.error(f"错误: {store.error}")
+        elif store.done:
+            st.info("无输出")
+        else:
+            st.caption("等待中...")
+        return
+
+    st.caption(f"共 {len(completed)} 条发言")
+    with st.container(height=400):
+        for msg in completed:
+            st.markdown(f"**{msg.role}**: {msg.content}")
+
+
 def _build_experiment_result():
     """Parse stores into ThesisExperimentResult and save to session state."""
     stores = st.session_state.exp_stores
@@ -717,11 +738,11 @@ with tab_run:
             with col_m:
                 st.markdown("### 🏆 time_master")
                 if master_store:
-                    _render_partial_messages(master_store)
+                    _render_full_messages(master_store)
             with col_c:
                 st.markdown("### 🌪️ time_chaos")
                 if chaos_store:
-                    _render_partial_messages(chaos_store)
+                    _render_full_messages(chaos_store)
 
             time.sleep(1.5)
             st.rerun()
@@ -745,11 +766,11 @@ with tab_run:
         with col_m:
             st.markdown("### 🏆 time_master")
             if master_store:
-                _render_partial_messages(master_store)
+                _render_full_messages(master_store)
         with col_c:
             st.markdown("### 🌪️ time_chaos")
             if chaos_store:
-                _render_partial_messages(chaos_store)
+                _render_full_messages(chaos_store)
 
 
 # ===== TAB 3: 绩效评估 =====
