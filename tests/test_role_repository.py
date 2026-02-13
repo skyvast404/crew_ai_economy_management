@@ -1,13 +1,11 @@
 """Unit tests for role_repository.py"""
 
-import json
-import tempfile
 from pathlib import Path
-
-import pytest
+import tempfile
 
 from lib_custom.role_models import RoleConfig
 from lib_custom.role_repository import RoleRepository
+import pytest
 
 
 class TestRoleRepository:
@@ -67,7 +65,7 @@ class TestRoleRepository:
     def test_add_duplicate_role_fails(self, temp_config_file):
         """Test adding duplicate role fails."""
         repo = RoleRepository(temp_config_file)
-        db = repo.load_roles()
+        repo.load_roles()
 
         duplicate_role = RoleConfig(
             role_id="boss",  # Already exists
@@ -149,7 +147,7 @@ class TestRoleRepository:
     def test_backup_created(self, temp_config_file):
         """Test backup file is created on save."""
         repo = RoleRepository(temp_config_file)
-        db = repo.load_roles()
+        repo.load_roles()
 
         # Modify and save
         repo.update_role("boss", {"goal": "Modified goal"})

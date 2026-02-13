@@ -1,15 +1,14 @@
 """Unit tests for role_models.py"""
 
-import pytest
-from pydantic import ValidationError
 from lib_custom.role_models import (
+    DEFAULT_FOLLOWUP_PROMPT,
+    DEFAULT_ROUND_1_PROMPT,
     RoleConfig,
     RolesDatabase,
     create_default_roles,
-    DEFAULT_ROUND_1_PROMPT,
-    DEFAULT_FOLLOWUP_PROMPT,
-    DEFAULT_ANALYST_PROMPT,
 )
+from pydantic import ValidationError
+import pytest
 
 
 class TestRoleConfig:

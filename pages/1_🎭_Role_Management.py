@@ -1,8 +1,8 @@
 """Role Management Page - CRUD interface for managing agent roles."""
 
-import streamlit as st
 from lib_custom.role_models import RoleConfig
 from lib_custom.role_repository import RoleRepository
+import streamlit as st
 
 
 # Page config
@@ -61,7 +61,7 @@ st.subheader("对话角色")
 st.caption("顺序决定发言顺序")
 
 conv_roles = db.get_conversation_roles()
-for idx, role in enumerate(conv_roles):
+for _idx, role in enumerate(conv_roles):
     with st.container():
         col1, col2, col3 = st.columns([3, 1, 1])
 

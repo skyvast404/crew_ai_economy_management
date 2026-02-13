@@ -1,13 +1,12 @@
 """Integration tests for role management system."""
 
-import tempfile
 from pathlib import Path
-
-import pytest
+import tempfile
 
 from lib_custom.crew_builder import CrewBuilder
 from lib_custom.role_models import RoleConfig
 from lib_custom.role_repository import RoleRepository
+import pytest
 
 
 class TestRoleManagementIntegration:

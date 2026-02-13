@@ -26,12 +26,13 @@ Example:
     ```
 """
 
+from crewai.flow.async_feedback.providers import ConsoleProvider
 from crewai.flow.async_feedback.types import (
     HumanFeedbackPending,
     HumanFeedbackProvider,
     PendingFeedbackContext,
 )
-from crewai.flow.async_feedback.providers import ConsoleProvider
+
 
 __all__ = [
     "ConsoleProvider",

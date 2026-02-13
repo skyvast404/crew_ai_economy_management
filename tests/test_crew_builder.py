@@ -1,9 +1,8 @@
 """Unit tests for crew_builder.py"""
 
-import pytest
-
 from lib_custom.crew_builder import CrewBuilder, build_comparison_crew
 from lib_custom.role_models import RoleConfig, create_default_roles
+import pytest
 
 
 class TestCrewBuilder:
@@ -76,7 +75,7 @@ class TestCrewBuilder:
         # Should have conversation agents + analyst
         assert len(crew.agents) == 4
 
-        # Should have 2 rounds × 3 conv agents + 1 analyst task
+        # Should have 2 rounds x 3 conv agents + 1 analyst task
         assert len(crew.tasks) == 7
 
     def test_build_crew_no_analyst_fails(self, roles_db):
@@ -116,7 +115,7 @@ class TestCrewBuilder:
             role_id="analyst",
             role_name="Analyst",
             goal="从组织行为学角度分析会议讨论",
-            backstory="你是组织行为学研究者，擅长分析职场互动。",
+            backstory="你是组织行为学研究者, 擅长分析职场互动。",
             avatar="📊",
             role_type="analyst",
             order=999,

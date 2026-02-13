@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from crewai.flow.persistence.base import FlowPersistence
 from crewai.utilities.paths import db_storage_path
 
+
 if TYPE_CHECKING:
     from crewai.flow.async_feedback.types import PendingFeedbackContext
 
@@ -196,7 +197,6 @@ class SQLiteFlowPersistence(FlowPersistence):
             state_data: Current state data
         """
         # Import here to avoid circular imports
-        from crewai.flow.async_feedback.types import PendingFeedbackContext
 
         # Convert state_data to dict
         if isinstance(state_data, BaseModel):

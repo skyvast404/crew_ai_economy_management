@@ -11,24 +11,25 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-import streamlit as st
 from dotenv import load_dotenv
+import streamlit as st
+
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-from crewai import Crew
 from crewai.types.streaming import CrewStreamingOutput, StreamChunkType
-
 from lib_custom.chat_store import ChatMessage, ChatMessageStore
 from lib_custom.crew_builder import CrewBuilder, build_comparison_crew
 from lib_custom.leadership_styles import LEADERSHIP_STYLES, apply_style_to_roles
 from lib_custom.llm_config import create_primary_llm
 from lib_custom.role_repository import RoleRepository
-from lib_custom.runtime_state import STATE as RUNTIME_STATE
-from lib_custom.runtime_state import ensure_event_handlers_registered
+from lib_custom.runtime_state import (
+    STATE as RUNTIME_STATE,
+    ensure_event_handlers_registered,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +94,7 @@ def validate_api_endpoint() -> tuple[bool, str]:
     except TimeoutError:
         return False, f"❌ 连接超时: {base_url}\n请检查服务是否正常"
     except Exception as e:
-        return False, f"❌ 连接错误: {str(e)}"
+        return False, f"❌ 连接错误: {e!s}"
 
 
 ensure_event_handlers_registered()
@@ -363,7 +364,7 @@ def run_multi_style_simulation(
             logger.info(f"Simulation completed for {style.style_name} in {elapsed:.1f}s")
             store.mark_done()
         except Exception as e:
-            error_msg = f"{type(e).__name__}: {str(e)}"
+            error_msg = f"{type(e).__name__}: {e!s}"
             logger.error(f"Simulation failed for {style.style_name}: {error_msg}")
 
             store.mark_error(error_msg)
@@ -433,7 +434,7 @@ def run_multi_style_simulation(
                 logger.info(f"Comparison analysis completed in {elapsed:.1f}s")
                 comparison_store.mark_done()
             except Exception as e:
-                error_msg = f"{type(e).__name__}: {str(e)}"
+                error_msg = f"{type(e).__name__}: {e!s}"
                 logger.error(f"Comparison analysis failed: {error_msg}")
 
                 comparison_store.mark_error(error_msg)
@@ -473,7 +474,7 @@ def _run_in_thread(topic, num_rounds, selected_style_ids, style_stores, config):
         )
     except Exception as e:
         logger.exception("Simulation thread crashed before completion")
-        error_msg = f"运行线程异常: {type(e).__name__}: {str(e)}"
+        error_msg = f"运行线程异常: {type(e).__name__}: {e!s}"
         RUNTIME_STATE.set_progress(live=error_msg, last_update=str(time.time()))
         for store in style_stores.values():
             if not store.done:

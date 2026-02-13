@@ -10,9 +10,10 @@ sys.modules and persists across Streamlit reruns. Put thread-shared state here.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import threading
 import time
-from dataclasses import dataclass, field
+
 from crewai.events.event_bus import crewai_event_bus
 from crewai.events.types.agent_events import (
     AgentExecutionCompletedEvent,

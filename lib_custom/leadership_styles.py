@@ -89,6 +89,21 @@ def apply_style_to_roles(db: RolesDatabase, style: LeadershipStyle) -> RolesData
     return RolesDatabase(version=db.version, roles=new_roles)
 
 
+# ---------------------------------------------------------------------------
+# Boss-type → leadership-style mapping
+# ---------------------------------------------------------------------------
+BOSS_TYPE_TO_LEADERSHIP_STYLES: dict[str, list[str]] = {
+    "time_master": ["transformational", "servant"],
+    "time_chaos": ["transactional", "authoritative"],
+}
+
+
+def get_leadership_styles_for_boss(boss_type_id: str) -> list[LeadershipStyle]:
+    """Return the leadership styles associated with a boss type."""
+    style_ids = BOSS_TYPE_TO_LEADERSHIP_STYLES.get(boss_type_id, [])
+    return [LEADERSHIP_STYLES[sid] for sid in style_ids if sid in LEADERSHIP_STYLES]
+
+
 DEFAULT_COMPARISON_ANALYST_PROMPT = """你是组织行为学研究者。请对比分析同一话题在不同领导风格下的团队互动差异。
 
 会议主题: {topic}

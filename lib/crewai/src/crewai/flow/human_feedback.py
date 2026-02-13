@@ -293,14 +293,13 @@ def human_feedback(
             if effective_provider is not None:
                 # Use provider (may raise HumanFeedbackPending for async providers)
                 return effective_provider.request_feedback(context, flow_instance)
-            else:
-                # Use default console input (local development)
-                return flow_instance._request_human_feedback(
-                    message=message,
-                    output=method_output,
-                    metadata=metadata,
-                    emit=emit,
-                )
+            # Use default console input (local development)
+            return flow_instance._request_human_feedback(
+                message=message,
+                output=method_output,
+                metadata=metadata,
+                emit=emit,
+            )
 
         def _process_feedback(
             flow_instance: Flow,

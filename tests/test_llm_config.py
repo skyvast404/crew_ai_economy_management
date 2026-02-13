@@ -3,12 +3,11 @@
 import os
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from lib_custom.llm_config import (
     create_primary_llm,
     get_available_llms,
 )
+import pytest
 
 
 def _make_fake_llm(**kwargs):

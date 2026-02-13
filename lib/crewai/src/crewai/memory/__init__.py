@@ -4,7 +4,6 @@ from crewai.memory.long_term.long_term_memory import LongTermMemory
 from crewai.memory.short_term.short_term_memory import ShortTermMemory
 
 
-
 __all__ = [
     "EntityMemory",
     "ExternalMemory",

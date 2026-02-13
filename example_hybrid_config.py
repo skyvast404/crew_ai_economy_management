@@ -6,7 +6,9 @@ environment variables and code configuration.
 """
 
 import os
-from crewai import Agent, Task, Crew, LLM
+
+from crewai import LLM, Agent, Crew, Task
+
 
 # Config loaded from .env file
 # OPENAI_API_KEY, OPENAI_BASE_URL, and OPENAI_MODEL_NAME are read from environment

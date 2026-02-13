@@ -6,7 +6,9 @@ by directly specifying the LLM configuration in code.
 """
 
 import os
-from crewai import Agent, Task, Crew, LLM
+
+from crewai import LLM, Agent, Crew, Task
+
 
 # Config loaded from .env via load_dotenv()
 # OPENAI_API_KEY, OPENAI_BASE_URL, and OPENAI_MODEL_NAME are read from environment

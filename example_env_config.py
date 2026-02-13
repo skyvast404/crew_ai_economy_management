@@ -11,7 +11,8 @@ Prerequisites:
    OPENAI_MODEL_NAME=gpt-5.2
 """
 
-from crewai import Agent, Task, Crew
+from crewai import Agent, Crew, Task
+
 
 # Create an agent - it will automatically use the environment variables
 agent = Agent(

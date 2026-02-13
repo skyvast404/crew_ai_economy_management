@@ -1,6 +1,7 @@
 """Pydantic models for role configuration and validation."""
 
 from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -21,6 +22,9 @@ class RoleConfig(BaseModel):
     communication_style: str | None = None
     emotional_tendency: str | None = None
     values: str | None = None
+
+    # Personality type linkage (optional — bridges to personality dashboard)
+    personality_type_id: str | None = None
 
     # Prompt templates
     round_1_prompt: str | None = None

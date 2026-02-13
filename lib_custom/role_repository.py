@@ -1,11 +1,17 @@
 """Repository for role configuration persistence."""
 
+from __future__ import annotations
+
 import json
-import threading
+import logging
 from pathlib import Path
+import threading
 from typing import Any
 
 from lib_custom.role_models import RoleConfig, RolesDatabase, create_default_roles
+
+
+logger = logging.getLogger(__name__)
 
 
 class RoleRepository:
@@ -62,7 +68,7 @@ class RoleRepository:
                 with open(self.backup_path, "w") as f:
                     f.write(content)
             except Exception:
-                pass  # Backup is optional
+                logger.warning("Failed to create backup", exc_info=True)
 
     def add_role(self, role: RoleConfig) -> RolesDatabase:
         """Add a new role to the database."""
@@ -91,16 +97,12 @@ class RoleRepository:
         """Update the order of roles."""
         db = self.load_roles()
 
-        # Update orders
-        new_roles = []
-        for role in db.roles:
-            if role.role_id in role_orders:
-                updated_role = role.model_copy(
-                    update={"order": role_orders[role.role_id]}
-                )
-                new_roles.append(updated_role)
-            else:
-                new_roles.append(role)
+        new_roles = [
+            role.model_copy(update={"order": role_orders[role.role_id]})
+            if role.role_id in role_orders
+            else role
+            for role in db.roles
+        ]
 
         new_db = RolesDatabase(version=db.version, roles=new_roles)
         self.save_roles(new_db)
@@ -133,31 +135,6 @@ class RoleRepository:
         self.save_roles(new_db)
         return new_db
 
-    def reset_to_defaults(self) -> RolesDatabase:
-        """Reset roles to default configuration."""
-        db = create_default_roles()
-        self.save_roles(db)
-        return db
-
-    def reorder_roles(self, role_orders: dict[str, int]) -> RolesDatabase:
-        """Update the order of roles."""
-        db = self.load_roles()
-
-        # Update orders
-        new_roles = []
-        for role in db.roles:
-            if role.role_id in role_orders:
-                updated_role = role.model_copy(
-                    update={"order": role_orders[role.role_id]}
-                )
-                new_roles.append(updated_role)
-            else:
-                new_roles.append(role)
-
-        new_db = RolesDatabase(version=db.version, roles=new_roles)
-        self.save_roles(new_db)
-        return new_db
-
     def delete_role(self, role_id: str) -> RolesDatabase:
         """Delete a role from the database."""
         db = self.load_roles()
@@ -175,30 +152,5 @@ class RoleRepository:
         new_roles = [r for r in db.roles if r.role_id != role_id]
         new_db = RolesDatabase(version=db.version, roles=new_roles)
 
-        self.save_roles(new_db)
-        return new_db
-
-    def reset_to_defaults(self) -> RolesDatabase:
-        """Reset roles to default configuration."""
-        db = create_default_roles()
-        self.save_roles(db)
-        return db
-
-    def reorder_roles(self, role_orders: dict[str, int]) -> RolesDatabase:
-        """Update the order of roles."""
-        db = self.load_roles()
-
-        # Update orders
-        new_roles = []
-        for role in db.roles:
-            if role.role_id in role_orders:
-                updated_role = role.model_copy(
-                    update={"order": role_orders[role.role_id]}
-                )
-                new_roles.append(updated_role)
-            else:
-                new_roles.append(role)
-
-        new_db = RolesDatabase(version=db.version, roles=new_roles)
         self.save_roles(new_db)
         return new_db

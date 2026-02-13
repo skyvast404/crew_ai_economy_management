@@ -1,15 +1,14 @@
 """Unit tests for leadership_styles.py"""
 
-import pytest
-from pydantic import ValidationError
-
 from lib_custom.leadership_styles import (
+    DEFAULT_COMPARISON_ANALYST_PROMPT,
     LEADERSHIP_STYLES,
     LeadershipStyle,
     apply_style_to_roles,
-    DEFAULT_COMPARISON_ANALYST_PROMPT,
 )
 from lib_custom.role_models import create_default_roles
+from pydantic import ValidationError
+import pytest
 
 
 class TestLeadershipStyle:
@@ -21,8 +20,8 @@ class TestLeadershipStyle:
             style_id="test",
             style_name="测试风格",
             description="这是一个测试用的领导风格描述",
-            boss_goal="测试目标描述内容，确保长度足够",
-            boss_backstory="测试背景故事描述内容，确保长度足够",
+            boss_goal="测试目标描述内容, 确保长度足够",
+            boss_backstory="测试背景故事描述内容, 确保长度足够",
             boss_personality="测试性格",
             boss_communication_style="测试沟通",
             boss_emotional_tendency="测试情绪",
@@ -130,7 +129,7 @@ class TestApplyStyleToRoles:
         style = LEADERSHIP_STYLES["servant"]
         new_db = apply_style_to_roles(base_db, style)
 
-        for orig, new in zip(base_db.roles, new_db.roles):
+        for orig, new in zip(base_db.roles, new_db.roles, strict=True):
             if orig.role_id != "boss":
                 assert orig.goal == new.goal
                 assert orig.backstory == new.backstory
