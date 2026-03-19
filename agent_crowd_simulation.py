@@ -322,7 +322,7 @@ def run_multi_style_simulation(
                 last_update=str(time.time()),
             )
             crew = builder.build_crew(topic, num_rounds)
-            RUNTIME_STATE.active_store = store
+            RUNTIME_STATE.set_active_store(store)
             RUNTIME_STATE.set_current_prefix(style_id)
             progress_callback(idx, total_steps, style.style_name)
             logger.info(f"Starting simulation for style: {style.style_name}")
@@ -369,7 +369,7 @@ def run_multi_style_simulation(
 
             store.mark_error(error_msg)
         finally:
-            RUNTIME_STATE.active_store = None
+            RUNTIME_STATE.set_active_store(None)
             RUNTIME_STATE.set_current_prefix("")
 
         style_conversations[style.style_name] = extract_conversation_text(
@@ -381,7 +381,7 @@ def run_multi_style_simulation(
         comparison_store = style_stores.get("__comparison__")
         if comparison_store is not None:
             try:
-                RUNTIME_STATE.active_store = comparison_store
+                RUNTIME_STATE.set_active_store(comparison_store)
                 RUNTIME_STATE.set_current_prefix("__comparison__")
                 progress_callback(
                     len(selected_style_ids), total_steps, "跨风格对比分析"
@@ -439,7 +439,7 @@ def run_multi_style_simulation(
 
                 comparison_store.mark_error(error_msg)
             finally:
-                RUNTIME_STATE.active_store = None
+                RUNTIME_STATE.set_active_store(None)
                 RUNTIME_STATE.set_current_prefix("")
 
 

@@ -55,19 +55,19 @@ EVALUATION_DIMENSIONS: dict[str, EvaluationDimension] = {
     "task_completion": EvaluationDimension(
         id="task_completion",
         name_zh="任务完成质量",
-        description="团队讨论是否围绕OKR展开，行动计划是否清晰可执行",
+        description="团队在各项目阶段的交付质量和进度管理",
         weight=0.20,
     ),
     "collaboration": EvaluationDimension(
         id="collaboration",
         name_zh="协作效率",
-        description="成员间是否有效配合，信息是否充分共享",
+        description="成员间跨阶段协作配合效率",
         weight=0.15,
     ),
     "decision_quality": EvaluationDimension(
         id="decision_quality",
         name_zh="决策质量",
-        description="决策过程是否理性，是否考虑多方意见",
+        description="项目执行中决策是否理性，是否考虑多方意见",
         weight=0.15,
     ),
     "innovation": EvaluationDimension(
@@ -85,7 +85,7 @@ EVALUATION_DIMENSIONS: dict[str, EvaluationDimension] = {
     "communication": EvaluationDimension(
         id="communication",
         name_zh="沟通有效性",
-        description="信息传递是否清晰，是否有误解或冲突",
+        description="项目执行中信息传递是否清晰，是否有误解或冲突",
         weight=0.10,
     ),
     "risk_management": EvaluationDimension(
@@ -97,7 +97,7 @@ EVALUATION_DIMENSIONS: dict[str, EvaluationDimension] = {
     "goal_alignment": EvaluationDimension(
         id="goal_alignment",
         name_zh="目标对齐度",
-        description="讨论是否始终围绕核心目标",
+        description="项目执行是否始终围绕核心OKR目标",
         weight=0.10,
     ),
 }

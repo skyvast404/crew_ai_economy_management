@@ -13,6 +13,7 @@ through project stages (e.g., requirements → development → testing → launc
   4. 论文素材导出 — structured data, charts, markdown report
 """
 
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import re
 import threading
@@ -21,7 +22,10 @@ import time
 from crewai import Agent, Crew, Process, Task
 from crewai.types.streaming import CrewStreamingOutput, StreamChunkType
 from lib_custom.chat_store import ChatMessageStore
-from lib_custom.default_team import DEFAULT_TEAM_MEMBERS, create_default_team
+from lib_custom.default_team import (
+    DEFAULT_TEAM_MEMBERS,
+    create_sized_team,
+)
 from lib_custom.experiment_runner import (
     DimensionScore,
     ExperimentConfig,
@@ -148,7 +152,9 @@ def _build_experiment_result():
     if okrs is None:
         return
 
-    team = create_default_team("time_master")
+    team = create_sized_team(
+        "time_master", st.session_state.get("exp_team_size", 5)
+    )
 
     result = ThesisExperimentResult(
         config=ExperimentConfig(
@@ -334,6 +340,7 @@ def _run_single_experiment(
     max_phases: int,
     store: ChatMessageStore,
     config: dict,
+    team_size: int = 12,
 ):
     """Run a single experiment for one boss type (called in background thread)."""
     try:
@@ -343,8 +350,8 @@ def _run_single_experiment(
         return
 
     try:
-        team = create_default_team(boss_type_id)
-        RUNTIME_STATE.active_store = store
+        team = create_sized_team(boss_type_id, team_size)
+        RUNTIME_STATE.set_active_store(store)
         RUNTIME_STATE.set_current_prefix(boss_type_id)
 
         crew = build_thesis_crew(
@@ -355,6 +362,7 @@ def _run_single_experiment(
             max_phases=max_phases,
             llm=llm,
             config=config,
+            max_rpm=config.get("max_rpm", 60),
         )
 
         start_time = time.time()
@@ -409,7 +417,7 @@ def _run_single_experiment(
         logger.error("Experiment failed for %s: %s", boss_type_id, error_msg)
         store.mark_error(error_msg)
     finally:
-        RUNTIME_STATE.active_store = None
+        RUNTIME_STATE.set_active_store(None)
         RUNTIME_STATE.set_current_prefix("")
 
 
@@ -417,10 +425,11 @@ def _run_thesis_experiment_thread(
     topic: str,
     project_type: str,
     max_phases: int,
+    team_size: int,
     stores: dict[str, ChatMessageStore],
     config: dict,
 ):
-    """Background thread: run all boss types sequentially, then compare."""
+    """Background thread: run all boss types in parallel, then compare."""
     okrs = DEFAULT_OKRS[project_type]
     boss_types = [bt for bt in BOSS_TYPES if bt in stores]
 
@@ -434,29 +443,36 @@ def _run_thesis_experiment_thread(
         call_started_at="",
     )
 
-    for idx, boss_type_id in enumerate(boss_types):
-        store = stores[boss_type_id]
-        if store.cancelled:
-            break
+    RUNTIME_STATE.set_progress(
+        step="1",
+        total="2",
+        label=f"并行运行 {len(boss_types)} 组实验",
+        live="启动中...",
+        last_update=str(time.time()),
+    )
 
-        RUNTIME_STATE.set_progress(
-            step=str(idx + 1),
-            total=str(len(boss_types) + 1),
-            label=f"运行: {BOSS_TYPES[boss_type_id].name_zh}",
-            live=f"构建 {boss_type_id} 实验...",
-            last_update=str(time.time()),
-        )
-
-        _run_single_experiment(
-            boss_type_id, topic, okrs, max_phases, store, config
-        )
+    with ThreadPoolExecutor(max_workers=len(boss_types)) as pool:
+        futures = {}
+        for boss_type_id in boss_types:
+            store = stores[boss_type_id]
+            if store.cancelled:
+                continue
+            futures[boss_type_id] = pool.submit(
+                _run_single_experiment,
+                boss_type_id, topic, okrs, max_phases, store, config, team_size,
+            )
+        for boss_type_id, future in futures.items():
+            try:
+                future.result()
+            except Exception:
+                logger.debug("Experiment %s raised", boss_type_id, exc_info=True)
 
     # Run comparison
     comp_store = stores.get("__comparison__")
     if comp_store and not comp_store.cancelled:
         RUNTIME_STATE.set_progress(
-            step=str(len(boss_types) + 1),
-            total=str(len(boss_types) + 1),
+            step="2",
+            total="2",
             label="跨条件对比分析",
             live="生成对比分析...",
             last_update=str(time.time()),
@@ -477,7 +493,7 @@ def _run_thesis_experiment_thread(
                 eval_neutral = ev
 
         try:
-            RUNTIME_STATE.active_store = comp_store
+            RUNTIME_STATE.set_active_store(comp_store)
             RUNTIME_STATE.set_current_prefix("__comparison__")
             llm = create_primary_llm()
             prompt = build_comparison_summary_prompt(
@@ -504,7 +520,7 @@ def _run_thesis_experiment_thread(
                 tasks=[task],
                 process=Process.sequential,
                 verbose=False,
-                max_rpm=10,
+                max_rpm=60,
                 stream=False,
             )
             comparison_crew.kickoff()
@@ -513,7 +529,7 @@ def _run_thesis_experiment_thread(
         except Exception as e:
             comp_store.mark_error(f"{type(e).__name__}: {e}")
         finally:
-            RUNTIME_STATE.active_store = None
+            RUNTIME_STATE.set_active_store(None)
             RUNTIME_STATE.set_current_prefix("")
 
     RUNTIME_STATE.set_progress(done="true", last_update=str(time.time()))
@@ -525,7 +541,8 @@ def _run_thesis_experiment_thread(
 _DEFAULTS: dict = {
     "exp_topic": "Q3产品发布计划讨论",
     "exp_project_type": "urgent_launch",
-    "exp_max_phases": 4,
+    "exp_max_phases": 3,
+    "exp_team_size": 5,
     "exp_running": False,
     "exp_stores": {},
     "exp_result": None,
@@ -580,6 +597,15 @@ with tab_config:
         )
         st.session_state.exp_max_phases = max_phases
 
+        team_size = st.slider(
+            "团队规模",
+            min_value=3,
+            max_value=12,
+            value=st.session_state.exp_team_size,
+            help="参与实验的团队成员数量（从默认12人中取前N人）",
+        )
+        st.session_state.exp_team_size = team_size
+
         # Phase names preview
         phase_names = get_phase_names_zh(project_type)
         active_phases = phase_names[:max_phases]
@@ -600,24 +626,28 @@ with tab_config:
 
         # Research design summary
         st.subheader("🔬 研究设计")
-        st.markdown("""
+        _ts = st.session_state.exp_team_size
+        st.markdown(f"""
 | 变量 | 说明 |
 |------|------|
 | **自变量(IV)** | 老板时间管理类型 (time_master / time_neutral / time_chaos) |
 | **因变量(DV)** | 团队绩效（8维度评分） |
 | **调节变量** | 项目类型 |
+| **团队规模** | {_ts} 人 |
 | **模拟模式** | 项目生命周期推进（阶段制，可自由结束） |
-| **实验设计** | 3 (boss) × 1 (project) = 3 组对比 |
+| **实验设计** | 3 (boss) × 1 (project) = 3 组并行对比 |
 """)
 
     with col_right:
-        st.subheader("👥 默认团队 (12人)")
-        for i in range(0, 12, 3):
+        _preview_size = st.session_state.exp_team_size
+        st.subheader(f"👥 默认团队 ({_preview_size}人)")
+        _preview_members = DEFAULT_TEAM_MEMBERS[:_preview_size]
+        for i in range(0, _preview_size, 3):
             cols = st.columns(3)
             for j, col in enumerate(cols):
                 idx = i + j
-                if idx < len(DEFAULT_TEAM_MEMBERS):
-                    member = DEFAULT_TEAM_MEMBERS[idx]
+                if idx < len(_preview_members):
+                    member = _preview_members[idx]
                     ptype = PERSONALITY_TYPES.get(member.personality_type_id)
                     if ptype:
                         with col:
@@ -690,11 +720,12 @@ with tab_run:
             "context_window": 30,
             "stream": True,
             "seed": 42,
+            "max_rpm": 60,
         }
 
         RUNTIME_STATE.set_progress(
             step="0",
-            total="3",
+            total="2",
             label="初始化实验",
             live="准备中...",
             last_update=str(time.time()),
@@ -706,6 +737,7 @@ with tab_run:
                 st.session_state.exp_topic,
                 st.session_state.exp_project_type,
                 st.session_state.exp_max_phases,
+                st.session_state.exp_team_size,
                 stores,
                 config,
             ),

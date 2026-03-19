@@ -30,6 +30,8 @@ dev = [
     "types-pymysql==1.1.0.20250916",
     "types-aiofiles~=24.1.0",
     "plotly>=6.5.2",
+    "streamlit>=1.55.0",
+    "python-dotenv>=1.1.1",
 ]
 
 

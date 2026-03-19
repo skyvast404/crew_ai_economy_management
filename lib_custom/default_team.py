@@ -47,6 +47,23 @@ def create_default_team(boss_type_id: str) -> TeamConfig:
     )
 
 
+def create_sized_team(boss_type_id: str, size: int) -> TeamConfig:
+    """Create a team with the first *size* members.
+
+    Args:
+        boss_type_id: One of "time_master", "time_neutral", or "time_chaos".
+        size: Number of members (clamped to 1..12).
+
+    Returns:
+        A TeamConfig with *size* members.
+    """
+    clamped = max(1, min(size, len(DEFAULT_TEAM_MEMBERS)))
+    return TeamConfig(
+        boss_type_id=boss_type_id,
+        members=list(DEFAULT_TEAM_MEMBERS[:clamped]),
+    )
+
+
 def get_member_personality_name(member: TeamMember) -> str:
     """Return the Chinese personality type name for a team member."""
     ptype = PERSONALITY_TYPES.get(member.personality_type_id)

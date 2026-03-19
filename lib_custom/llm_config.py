@@ -33,6 +33,7 @@ def create_primary_llm() -> LLM:
     kwargs: dict = {
         "model": model_name,
         "api_key": api_key,
+        "provider": "openai",
     }
     if base_url:
         kwargs["base_url"] = base_url

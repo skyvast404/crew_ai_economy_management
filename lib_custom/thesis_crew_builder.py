@@ -556,6 +556,7 @@ def build_thesis_crew(
     config: dict | None = None,
     ttl_config: TemporalLeadershipConfig | None = None,
     max_phases: int | None = None,
+    max_rpm: int = 60,
 ) -> Crew:
     """Build a complete crew for thesis experiments.
 
@@ -586,6 +587,7 @@ def build_thesis_crew(
             with neutral persona + TTL overlay (bypasses leadership styles).
         max_phases: When provided, enables phase-based mode with up to this
             many phases. None = legacy round-based mode.
+        max_rpm: Maximum requests per minute for the crew (default 60).
 
     Returns:
         A fully constructed Crew ready to kickoff.
@@ -702,6 +704,6 @@ def build_thesis_crew(
         tasks=tasks,
         process=Process.sequential,
         verbose=False,
-        max_rpm=10,
+        max_rpm=max_rpm,
         stream=bool(cfg.get("stream", True)),
     )

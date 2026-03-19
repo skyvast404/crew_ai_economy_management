@@ -10,6 +10,7 @@ sys.modules and persists across Streamlit reruns. Put thread-shared state here.
 
 from __future__ import annotations
 
+import contextvars
 from dataclasses import dataclass, field
 import threading
 import time
@@ -27,6 +28,16 @@ from crewai.events.types.llm_events import (
 from crewai.events.types.task_events import TaskCompletedEvent, TaskStartedEvent
 
 from lib_custom.chat_store import ChatMessage, ChatMessageStore
+
+# ContextVars for per-context active_store and current_prefix.
+# Unlike threading.local, ContextVars are propagated by contextvars.copy_context(),
+# which crewai's event bus uses when dispatching handlers to its thread pool.
+_active_store_var: contextvars.ContextVar[ChatMessageStore | None] = (
+    contextvars.ContextVar("_active_store", default=None)
+)
+_current_prefix_var: contextvars.ContextVar[str] = (
+    contextvars.ContextVar("_current_prefix", default="")
+)
 
 
 @dataclass
@@ -57,10 +68,13 @@ class RuntimeState:
         }
     )
 
-    # Active message store pointer set by the background thread.
-    active_store: ChatMessageStore | None = None
-    # Prefix to disambiguate messages from different styles (e.g. "transformational").
-    current_prefix: str = ""
+    def set_active_store(self, store: ChatMessageStore | None) -> None:
+        """Set active store for the current context (propagated to event handlers)."""
+        _active_store_var.set(store)
+
+    def get_active_store(self) -> ChatMessageStore | None:
+        """Get active store for the current context."""
+        return _active_store_var.get()
 
     def snapshot_progress(self) -> dict[str, str]:
         with self.lock:
@@ -79,12 +93,12 @@ class RuntimeState:
             self.llm_call_info.update(updates)
 
     def set_current_prefix(self, prefix: str) -> None:
-        with self.lock:
-            self.current_prefix = prefix
+        """Set current prefix for the current context (propagated to event handlers)."""
+        _current_prefix_var.set(prefix)
 
     def get_current_prefix(self) -> str:
-        with self.lock:
-            return self.current_prefix
+        """Get current prefix for the current context."""
+        return _current_prefix_var.get()
 
 
 STATE = RuntimeState()
@@ -101,9 +115,9 @@ def ensure_event_handlers_registered() -> None:
 
     @crewai_event_bus.on(AgentExecutionStartedEvent)
     def _on_agent_started(source, event: AgentExecutionStartedEvent):
-        if STATE.active_store is None:
+        store = STATE.get_active_store()
+        if store is None:
             return
-        store = STATE.active_store
         prefix = STATE.get_current_prefix()
         task_id = str(getattr(event.task, "id", "") or "")
         key = f"{prefix}:{task_id}" if task_id else None
@@ -124,9 +138,9 @@ def ensure_event_handlers_registered() -> None:
 
     @crewai_event_bus.on(AgentExecutionCompletedEvent)
     def _on_agent_completed(source, event: AgentExecutionCompletedEvent):
-        if STATE.active_store is None:
+        store = STATE.get_active_store()
+        if store is None:
             return
-        store = STATE.active_store
         prefix = STATE.get_current_prefix()
         task_id = str(getattr(event.task, "id", "") or "")
         key = f"{prefix}:{task_id}" if task_id else None
@@ -142,9 +156,9 @@ def ensure_event_handlers_registered() -> None:
 
     @crewai_event_bus.on(TaskStartedEvent)
     def _on_task_started(source, event: TaskStartedEvent):
-        if STATE.active_store is None:
+        store = STATE.get_active_store()
+        if store is None:
             return
-        store = STATE.active_store
         desc = ""
         if event.task and hasattr(event.task, "description"):
             desc = event.task.description[:80]
@@ -156,9 +170,9 @@ def ensure_event_handlers_registered() -> None:
 
     @crewai_event_bus.on(TaskCompletedEvent)
     def _on_task_completed(source, event: TaskCompletedEvent):
-        if STATE.active_store is None:
+        store = STATE.get_active_store()
+        if store is None:
             return
-        store = STATE.active_store
         STATE.set_progress(
             live="任务完成",
             last_update=str(time.time()),
