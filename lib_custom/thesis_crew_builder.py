@@ -3,6 +3,10 @@
 Converts PersonalityType + TeamMember into RoleConfig/Agent,
 builds the evaluator agent, and constructs the complete thesis experiment crew.
 
+Supports two simulation modes:
+    1. Round-based (legacy): fixed rounds, each person speaks once per round
+    2. Phase-based (new): project lifecycle phases with conditional continuation
+
 Supports two boss construction paths:
     1. Original: boss_type_id → leadership style (backward compatible)
     2. TTL path: TemporalLeadershipConfig → neutral boss + TTL behavior overlay
@@ -10,7 +14,11 @@ Supports two boss construction paths:
 
 from __future__ import annotations
 
+import json
+
 from crewai import LLM, Agent, Crew, Process, Task
+from crewai.tasks.conditional_task import ConditionalTask
+from crewai.tasks.task_output import TaskOutput
 
 from lib_custom.leadership_styles import (
     LeadershipStyle,
@@ -24,6 +32,13 @@ from lib_custom.personality_types import (
     PersonalityType,
     TeamConfig,
     TeamMember,
+)
+from lib_custom.project_phases import (
+    build_boss_phase_prompt,
+    build_manipulation_check_prompt,
+    build_member_phase_prompt,
+    build_status_checker_prompt,
+    get_phases_for_project,
 )
 from lib_custom.role_models import RoleConfig
 from lib_custom.temporal_leadership import TemporalLeadershipConfig, build_ttl_boss_role
@@ -181,7 +196,7 @@ def build_evaluator_role() -> RoleConfig:
     return RoleConfig(
         role_id="evaluator",
         role_name="📊 绩效评估专家",
-        goal="客观公正地评估团队绩效，基于OKR目标和讨论记录进行量化评分",
+        goal="客观公正地评估团队绩效，基于OKR目标和项目执行记录进行量化评分",
         backstory=(
             "你是一位独立客观的组织行为学研究者，拥有管理学博士学位，"
             "专注于领导力与团队绩效研究超过15年。"
@@ -205,12 +220,14 @@ def build_evaluator_prompt(okrs: OKRSet, full_conversation: str) -> str:
     dimensions_text = "\n".join(dim_lines)
 
     return f"""你是一位独立客观的组织行为学研究者，拥有管理学博士学位。
-你需要基于以下OKR目标和团队讨论记录，对团队绩效进行严格评估。
+你需要基于以下OKR目标和项目执行记录，对团队绩效进行严格评估。
+
+请注意评估团队在不同项目阶段的表现变化。
 
 ## 团队OKR
 {okrs_formatted}
 
-## 讨论记录
+## 项目执行记录
 {full_conversation}
 
 ## 评估要求
@@ -232,13 +249,81 @@ def build_evaluator_prompt(okrs: OKRSet, full_conversation: str) -> str:
   }},
   "overall_score": 0,
   "key_findings": ["发现1", "发现2"],
-  "boss_impact_analysis": "对老板领导风格影响的分析",
+  "boss_impact_analysis": "对老板领导风格在各阶段对团队行为的具体影响分析",
   "recommendations": ["建议1", "建议2"]
 }}"""
 
 
 # ---------------------------------------------------------------------------
-# Crew construction
+# Condition function for ConditionalTask cascade
+# ---------------------------------------------------------------------------
+def _should_continue(output: TaskOutput) -> bool:
+    """Determine whether the next phase should execute.
+
+    CrewAI passes task_outputs[-1] (the last global output) to the condition,
+    NOT the task's explicit context list. This means:
+    - Phase N+1's boss task sees Phase N's StatusChecker output (last in phase)
+    - Other tasks within Phase N+1 see their predecessor's output (non-JSON)
+
+    Cascade skip works because:
+    - If boss is skipped, its output is empty -> members see empty -> skip
+    - If boss executes (predecessor was non-JSON/non-empty), members also execute
+
+    Returns False (skip) when:
+    - Previous output is empty (cascade skip from earlier phases)
+    - StatusChecker determined project is complete (valid JSON with exact match)
+    """
+    raw = output.raw.strip()
+    if not raw:
+        return False
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict) and data.get("project_status") == "complete":
+            return False
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Status checker agent
+# ---------------------------------------------------------------------------
+def _build_status_checker_role() -> RoleConfig:
+    """Create a lightweight status checker role."""
+    return RoleConfig(
+        role_id="status_checker",
+        role_name="🔍 项目状态检查器",
+        goal="判断项目是否应继续推进到下一阶段",
+        backstory="你是一位项目管理专家，负责评估阶段完成情况并决定项目走向。",
+        avatar="🔍",
+        role_type="analyst",
+        is_default=False,
+        order=998,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Manipulation checker agent
+# ---------------------------------------------------------------------------
+def _build_manipulation_checker_role() -> RoleConfig:
+    """Create the manipulation check coding specialist role."""
+    return RoleConfig(
+        role_id="manipulation_checker",
+        role_name="🔬 行为编码专家",
+        goal="对领导者发言进行时间领导力行为编码",
+        backstory=(
+            "你是组织行为学编码专家，专注于 Mohammed & Nadkarni (2011) "
+            "时间领导力量表的行为编码。你独立、客观地分析领导者发言。"
+        ),
+        avatar="🔬",
+        role_type="analyst",
+        is_default=False,
+        order=997,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Crew construction — round-based (legacy)
 # ---------------------------------------------------------------------------
 _ROUND_1_PROMPT = """你是{role_name}。
 
@@ -275,6 +360,192 @@ _FOLLOWUP_PROMPT = """你是{role_name}。
 发言控制在150字以内。"""
 
 
+def _build_round_tasks(
+    all_conv_roles: list[RoleConfig],
+    all_conv_agents: list[Agent],
+    topic: str,
+    num_rounds: int,
+    context_size: int,
+) -> list[Task]:
+    """Build conversation tasks using the legacy round-based approach."""
+    tasks: list[Task] = []
+    for round_idx in range(num_rounds):
+        round_num = round_idx + 1
+        for i, agent in enumerate(all_conv_agents):
+            role = all_conv_roles[i]
+            prompt = _ROUND_1_PROMPT if round_num == 1 else _FOLLOWUP_PROMPT
+            description = prompt.format(
+                role_name=role.role_name,
+                goal=role.goal,
+                backstory=role.backstory,
+                personality=role.personality or "",
+                communication_style=role.communication_style or "",
+                emotional_tendency=role.emotional_tendency or "",
+                values=role.values or "",
+                topic=topic,
+                round=round_num,
+                context="",
+            )
+            ctx = tasks[-context_size:] if tasks else []
+            task = Task(
+                description=description,
+                expected_output=f"第{round_num}轮 - {role.role_name}的发言",
+                agent=agent,
+                context=ctx,
+            )
+            tasks.append(task)
+    return tasks
+
+
+# ---------------------------------------------------------------------------
+# Crew construction — phase-based (new)
+# ---------------------------------------------------------------------------
+def _make_task(
+    conditional: bool,
+    description: str,
+    expected_output: str,
+    agent: Agent,
+    context: list[Task],
+) -> Task:
+    """Create a Task or ConditionalTask based on the conditional flag."""
+    if conditional:
+        return ConditionalTask(
+            condition=_should_continue,
+            description=description,
+            expected_output=expected_output,
+            agent=agent,
+            context=context,
+        )
+    return Task(
+        description=description,
+        expected_output=expected_output,
+        agent=agent,
+        context=context,
+    )
+
+
+def _build_phase_tasks(
+    boss_type_id: str,
+    boss_role: RoleConfig,
+    boss_agent: Agent,
+    member_roles: list[RoleConfig],
+    member_agents: list[Agent],
+    status_checker_agent: Agent,
+    manipulation_checker_agent: Agent,
+    okrs: OKRSet,
+    max_phases: int,
+    seed: int = 42,
+) -> list[Task]:
+    """Build tasks for the phase-based project lifecycle mode.
+
+    Phase 1 uses regular Tasks. Phase 2+ uses ConditionalTasks that check
+    the previous StatusChecker output to decide whether to continue.
+    StatusChecker tasks are tagged so the evaluator can exclude them.
+    A single manipulation check task runs after all phases complete.
+    """
+    project_type_id = okrs.project_type_id
+    all_phases = get_phases_for_project(project_type_id)
+    num_phases = min(max_phases, len(all_phases))
+    okr_summary = format_okrs_for_prompt(okrs)
+
+    tasks: list[Task] = []
+    boss_tasks: list[Task] = []
+    status_checker_tasks: list[Task] = []
+
+    for phase_idx_0 in range(num_phases):
+        phase = all_phases[phase_idx_0]
+        phase_num = phase_idx_0 + 1
+        conditional = phase_idx_0 > 0  # Phase 2+ are conditional
+
+        # --- Boss directive ---
+        boss_prompt = build_boss_phase_prompt(
+            boss_type_id=boss_type_id,
+            role_name=boss_role.role_name,
+            goal=boss_role.goal,
+            backstory=boss_role.backstory,
+            personality=boss_role.personality or "",
+            communication_style=boss_role.communication_style or "",
+            phase=phase,
+            phase_idx=phase_num,
+            total_phases=num_phases,
+            okr_summary=okr_summary,
+            seed=seed,
+        )
+
+        boss_ctx = [status_checker_tasks[-1]] if status_checker_tasks else []
+        boss_task = _make_task(
+            conditional=conditional,
+            description=boss_prompt,
+            expected_output=f"阶段{phase_num} ({phase.name_zh}) - 老板指令",
+            agent=boss_agent,
+            context=boss_ctx,
+        )
+        tasks.append(boss_task)
+        boss_tasks.append(boss_task)
+
+        # --- Member reports ---
+        phase_tasks_so_far: list[Task] = [boss_task]
+        for member_role, member_agent in zip(member_roles, member_agents):
+            member_prompt = build_member_phase_prompt(
+                role_name=member_role.role_name,
+                personality=member_role.personality or "",
+                communication_style=member_role.communication_style or "",
+                emotional_tendency=member_role.emotional_tendency or "",
+                values=member_role.values or "",
+                phase=phase,
+                phase_idx=phase_num,
+                total_phases=num_phases,
+                okr_summary=okr_summary,
+            )
+
+            member_task = _make_task(
+                conditional=conditional,
+                description=member_prompt,
+                expected_output=(
+                    f"阶段{phase_num} ({phase.name_zh}) - "
+                    f"{member_role.role_name}的工作汇报"
+                ),
+                agent=member_agent,
+                context=list(phase_tasks_so_far),
+            )
+            tasks.append(member_task)
+            phase_tasks_so_far.append(member_task)
+
+        # --- Status checker ---
+        status_prompt = build_status_checker_prompt(
+            phase=phase,
+            phase_idx=phase_num,
+            total_phases=num_phases,
+        )
+
+        status_task = _make_task(
+            conditional=conditional,
+            description=status_prompt,
+            expected_output='{"project_status": "continue"} 或 {"project_status": "complete"}',
+            agent=status_checker_agent,
+            context=list(phase_tasks_so_far),
+        )
+        tasks.append(status_task)
+        status_checker_tasks.append(status_task)
+
+    # --- Manipulation check (regular Task — always executes after all phases) ---
+    mc_prompt = build_manipulation_check_prompt(
+        "(领导者的完整发言记录将通过上下文自动提供)"
+    )
+    manipulation_task = Task(
+        description=mc_prompt,
+        expected_output="严格JSON格式的6维度行为编码结果",
+        agent=manipulation_checker_agent,
+        context=list(boss_tasks),
+    )
+    tasks.append(manipulation_task)
+
+    return tasks
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 def build_thesis_crew(
     team: TeamConfig,
     boss_type_id: str,
@@ -284,6 +555,7 @@ def build_thesis_crew(
     llm: LLM | None = None,
     config: dict | None = None,
     ttl_config: TemporalLeadershipConfig | None = None,
+    max_phases: int | None = None,
 ) -> Crew:
     """Build a complete crew for thesis experiments.
 
@@ -291,6 +563,12 @@ def build_thesis_crew(
     - N employee agents (conversation roles mapped from personality types)
     - 1 boss agent (leadership-style path OR TTL path)
     - 1 evaluator agent (receives OKR + full transcript, outputs JSON scores)
+    - 1 status checker agent (phase mode only)
+    - 1 manipulation checker agent (phase mode only, behavioral coding)
+
+    Two simulation modes:
+        - max_phases provided → phase-based project lifecycle mode
+        - max_phases is None → legacy round-based discussion mode
 
     Two boss construction paths:
         - ttl_config provided → neutral boss + TTL behavior overlay (decoupled)
@@ -298,14 +576,16 @@ def build_thesis_crew(
 
     Args:
         team: Team configuration (variable size, not restricted to 12).
-        boss_type_id: "time_master" or "time_chaos" (used in original path).
-        topic: Discussion topic.
+        boss_type_id: "time_master", "time_chaos", or "time_neutral" (used in original path).
+        topic: Discussion topic (round mode) or project description (phase mode).
         okrs: OKR set for evaluation context.
-        num_rounds: Number of conversation rounds.
+        num_rounds: Number of conversation rounds (round mode only).
         llm: Optional LLM override.
         config: Optional config dict (agent_timeout, max_iterations, context_window).
         ttl_config: Optional TTL configuration. When provided, boss is built
             with neutral persona + TTL overlay (bypasses leadership styles).
+        max_phases: When provided, enables phase-based mode with up to this
+            many phases. None = legacy round-based mode.
 
     Returns:
         A fully constructed Crew ready to kickoff.
@@ -358,56 +638,67 @@ def build_thesis_crew(
     member_agents = [_make_agent(r) for r in member_roles]
     evaluator_agent = _make_agent(evaluator_role)
 
-    # All conversation roles: boss first, then members
-    all_conv_roles = [boss_role, *member_roles]
-    all_conv_agents = [boss_agent, *member_agents]
+    # --- Build tasks based on mode ---
+    if max_phases is not None:
+        # Phase-based mode
+        status_checker_role = _build_status_checker_role()
+        status_checker_agent = _make_agent(status_checker_role)
+        manipulation_checker_role = _build_manipulation_checker_role()
+        manipulation_checker_agent = _make_agent(manipulation_checker_role)
 
-    # --- Create conversation tasks ---
-    tasks: list[Task] = []
-    context_size = cfg["context_window"]
+        tasks = _build_phase_tasks(
+            boss_type_id=boss_type_id,
+            boss_role=boss_role,
+            boss_agent=boss_agent,
+            member_roles=member_roles,
+            member_agents=member_agents,
+            status_checker_agent=status_checker_agent,
+            manipulation_checker_agent=manipulation_checker_agent,
+            okrs=okrs,
+            max_phases=max_phases,
+            seed=cfg.get("seed", 42),
+        )
 
-    for round_idx in range(num_rounds):
-        round_num = round_idx + 1
-        for i, agent in enumerate(all_conv_agents):
-            role = all_conv_roles[i]
-            prompt = _ROUND_1_PROMPT if round_num == 1 else _FOLLOWUP_PROMPT
-            description = prompt.format(
-                role_name=role.role_name,
-                goal=role.goal,
-                backstory=role.backstory,
-                personality=role.personality or "",
-                communication_style=role.communication_style or "",
-                emotional_tendency=role.emotional_tendency or "",
-                values=role.values or "",
-                topic=topic,
-                round=round_num,
-                context="",
-            )
-            ctx = tasks[-context_size:] if tasks else []
-            task = Task(
-                description=description,
-                expected_output=f"第{round_num}轮 - {role.role_name}的发言",
-                agent=agent,
-                context=ctx,
-            )
-            tasks.append(task)
+        # Evaluator context: all non-status-checker, non-manipulation-checker tasks
+        evaluator_ctx = [
+            t for t in tasks
+            if t.agent not in (status_checker_agent, manipulation_checker_agent)
+        ]
 
-    # --- Create evaluator task ---
-    # The evaluator sees all conversation tasks as context.
-    # The prompt will be filled with the full conversation during execution,
-    # but we pass a placeholder now and rely on context passing.
-    evaluator_prompt = build_evaluator_prompt(okrs, "(完整对话记录将通过上下文自动提供)")
+        all_agents = [
+            boss_agent, *member_agents,
+            status_checker_agent, manipulation_checker_agent, evaluator_agent,
+        ]
+    else:
+        # Legacy round-based mode
+        all_conv_roles = [boss_role, *member_roles]
+        all_conv_agents = [boss_agent, *member_agents]
+        context_size = cfg["context_window"]
 
+        tasks = _build_round_tasks(
+            all_conv_roles=all_conv_roles,
+            all_conv_agents=all_conv_agents,
+            topic=topic,
+            num_rounds=num_rounds,
+            context_size=context_size,
+        )
+        evaluator_ctx = list(tasks)
+        all_agents = [*all_conv_agents, evaluator_agent]
+
+    # --- Create evaluator task (always regular Task, always executes) ---
+    evaluator_prompt = build_evaluator_prompt(
+        okrs, "(完整项目执行记录将通过上下文自动提供)"
+    )
     evaluator_task = Task(
         description=evaluator_prompt,
         expected_output="严格JSON格式的8维度团队绩效评估报告",
         agent=evaluator_agent,
-        context=tasks,  # evaluator sees ALL conversation tasks
+        context=evaluator_ctx,
     )
     tasks.append(evaluator_task)
 
     return Crew(
-        agents=[*all_conv_agents, evaluator_agent],
+        agents=all_agents,
         tasks=tasks,
         process=Process.sequential,
         verbose=False,

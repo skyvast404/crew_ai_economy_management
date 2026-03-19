@@ -63,6 +63,12 @@ class RunRecord(BaseModel):
     overall_b: float = 0.0
     overall_mean: float = 0.0
 
+    # Manipulation check scores (6 dimensions)
+    manipulation_scores: dict[str, float] = Field(default_factory=dict)
+
+    # Rule-based process metrics
+    process_metrics: dict[str, float] = Field(default_factory=dict)
+
     # Metadata
     elapsed_seconds: float = 0.0
     timestamp: str = ""
@@ -80,7 +86,7 @@ class ExperimentDesignMatrix(BaseModel):
     topic: str = "Q3产品发布计划讨论"
     project_type_id: str = "urgent_launch"
     team_size: int = 5
-    num_rounds: int = 4
+    max_phases: int = 4
     seed: int = 42
     total_runs: int = 72
     completed_runs: int = 0
@@ -90,7 +96,7 @@ def build_design_matrix(
     topic: str = "Q3产品发布计划讨论",
     project_type_id: str = "urgent_launch",
     team_size: int = 5,
-    num_rounds: int = 4,
+    max_phases: int = 4,
     n_per_stratum: int = 8,
     seed: int = 42,
 ) -> ExperimentDesignMatrix:
@@ -102,7 +108,7 @@ def build_design_matrix(
         topic: Discussion topic.
         project_type_id: Project type for OKR selection.
         team_size: Team size (default 5).
-        num_rounds: Conversation rounds per run (default 4).
+        max_phases: Maximum project phases per run (default 4).
         n_per_stratum: Replications per cell (default 8).
         seed: Random seed for team composition sampling.
 
@@ -146,7 +152,7 @@ def build_design_matrix(
         topic=topic,
         project_type_id=project_type_id,
         team_size=team_size,
-        num_rounds=num_rounds,
+        max_phases=max_phases,
         seed=seed,
         total_runs=total,
     )
@@ -275,12 +281,25 @@ def average_evaluator_scores(
 # ---------------------------------------------------------------------------
 # CSV / JSON export
 # ---------------------------------------------------------------------------
+_MC_DIMENSIONS = [
+    "mc_time_urgency", "mc_time_allocation", "mc_schedule_coordination",
+    "mc_priority_consistency", "mc_plan_clarity", "mc_disruption_frequency",
+]
+_PM_COLUMNS = [
+    "pm_total_messages", "pm_boss_message_count", "pm_member_message_count",
+    "pm_avg_message_length", "pm_temporal_marker_count",
+    "pm_temporal_marker_density", "pm_cross_reference_count",
+    "pm_conflict_marker_count", "pm_priority_change_count",
+    "pm_phases_completed",
+]
 _CSV_COLUMNS = [
     "run_id", "cell_label", "diversity_stratum", "ttl_level", "ttl_code",
     "composition_id", "composite_blau",
     "task_completion", "collaboration", "decision_quality", "innovation",
     "morale", "communication", "risk_management", "goal_alignment",
     "overall_mean", "overall_a", "overall_b",
+    *_MC_DIMENSIONS,
+    *_PM_COLUMNS,
     "elapsed_seconds", "timestamp", "status",
 ]
 
@@ -321,6 +340,13 @@ def export_to_csv(design: ExperimentDesignMatrix, filepath: str) -> str:
             # Add dimension scores (mean)
             for dim_id in EVALUATION_DIMENSIONS:
                 row[dim_id] = run.scores_mean.get(dim_id, 0.0)
+            # Add manipulation check scores
+            for mc_col in _MC_DIMENSIONS:
+                dim_key = mc_col.removeprefix("mc_")
+                row[mc_col] = run.manipulation_scores.get(dim_key, 0.0)
+            # Add process metrics
+            for pm_col in _PM_COLUMNS:
+                row[pm_col] = run.process_metrics.get(pm_col, 0.0)
             writer.writerow(row)
 
     logger.info("CSV exported: %s", filepath)

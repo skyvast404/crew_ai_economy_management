@@ -36,8 +36,9 @@ class ExperimentConfig(BaseModel):
     topic: str = Field(..., min_length=3)
     okrs: OKRSet
     team: TeamConfig
-    boss_types: list[str] = Field(default_factory=lambda: ["time_master", "time_chaos"])
+    boss_types: list[str] = Field(default_factory=lambda: ["time_master", "time_chaos", "time_neutral"])
     num_rounds: int = Field(default=3, ge=1, le=30)
+    max_phases: int | None = Field(default=None, ge=2, le=8)
     team_size: int = Field(default=12, ge=2, le=20)
     ttl_level: str | None = Field(default=None, pattern=r"^(low|medium|high)$")
     config: dict = Field(
@@ -76,6 +77,10 @@ class SingleRunResult(BaseModel):
     evaluation: EvaluationResult = Field(default_factory=EvaluationResult)
     messages: list[dict] = Field(default_factory=list)
     elapsed_seconds: float = 0.0
+    phases_completed: int = 0
+    manipulation_check_raw: str = ""
+    manipulation_scores: dict[str, float] = Field(default_factory=dict)
+    process_metrics: dict[str, float] = Field(default_factory=dict)
 
 
 class ThesisExperimentResult(BaseModel):
@@ -104,6 +109,7 @@ class FlatRunRecord(BaseModel):
     dimension_scores: dict[str, float] = Field(default_factory=dict)
     elapsed_seconds: float = 0.0
     timestamp: str = ""
+    phases_completed: int = 0
 
 
 def export_results_to_csv(
@@ -182,17 +188,14 @@ def extract_messages_as_dicts(store: ChatMessageStore) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Evaluation parsing
 # ---------------------------------------------------------------------------
-def parse_evaluation(raw_text: str) -> EvaluationResult:
-    """Parse the evaluator's JSON output into an EvaluationResult.
+def _extract_json_from_llm_output(raw_text: str) -> dict | None:
+    """Extract a JSON dict from LLM output that may be wrapped in markdown.
 
-    Handles cases where JSON is embedded in markdown code blocks.
-    Returns a default EvaluationResult if parsing fails.
+    Returns the parsed dict, or None if extraction/parsing fails.
     """
-    # Try to extract JSON from markdown code blocks
     json_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw_text, re.DOTALL)
     json_str = json_match.group(1) if json_match else raw_text.strip()
 
-    # Also try bare JSON
     if not json_str.startswith("{"):
         brace_start = json_str.find("{")
         brace_end = json_str.rfind("}")
@@ -201,7 +204,19 @@ def parse_evaluation(raw_text: str) -> EvaluationResult:
 
     try:
         data = json.loads(json_str)
+        return data if isinstance(data, dict) else None
     except json.JSONDecodeError:
+        return None
+
+
+def parse_evaluation(raw_text: str) -> EvaluationResult:
+    """Parse the evaluator's JSON output into an EvaluationResult.
+
+    Handles cases where JSON is embedded in markdown code blocks.
+    Returns a default EvaluationResult if parsing fails.
+    """
+    data = _extract_json_from_llm_output(raw_text)
+    if data is None:
         logger.warning("Failed to parse evaluation JSON: %s...", raw_text[:200])
         return EvaluationResult()
 
@@ -225,6 +240,28 @@ def parse_evaluation(raw_text: str) -> EvaluationResult:
         boss_impact_analysis=str(data.get("boss_impact_analysis", "")),
         recommendations=list(data.get("recommendations", [])),
     )
+
+
+def parse_manipulation_check(raw_text: str) -> dict[str, float]:
+    """Parse the manipulation checker's JSON output into dimension scores.
+
+    Returns a dict mapping dimension_id -> score (0-100).
+    Returns empty dict on parse failure.
+    """
+    data = _extract_json_from_llm_output(raw_text)
+    if data is None:
+        logger.warning("Failed to parse manipulation check JSON: %s...", raw_text[:200])
+        return {}
+
+    raw_dims = data.get("dimensions", {})
+    if not isinstance(raw_dims, dict):
+        return {}
+
+    scores: dict[str, float] = {}
+    for dim_id, dim_data in raw_dims.items():
+        if isinstance(dim_data, dict):
+            scores[dim_id] = float(max(0, min(100, int(dim_data.get("score") or 0))))
+    return scores
 
 
 def find_evaluator_output(store: ChatMessageStore) -> str:
@@ -256,7 +293,7 @@ def find_evaluator_output(store: ChatMessageStore) -> str:
 def create_default_experiment(
     topic: str = "Q3产品发布计划讨论",
     project_type_id: str = "urgent_launch",
-    num_rounds: int = 3,
+    max_phases: int = 4,
 ) -> ExperimentConfig:
     """Create a default experiment config with preset OKR and 12-member team."""
     from lib_custom.okr_models import DEFAULT_OKRS
@@ -271,15 +308,15 @@ def create_default_experiment(
         topic=topic,
         okrs=okrs,
         team=team,
-        boss_types=["time_master", "time_chaos"],
-        num_rounds=num_rounds,
+        boss_types=["time_master", "time_chaos", "time_neutral"],
+        max_phases=max_phases,
     )
 
 
 # ---------------------------------------------------------------------------
 # Comparison prompt
 # ---------------------------------------------------------------------------
-COMPARISON_PROMPT = """你是组织行为学研究者。请对比分析同一团队在两种不同时间管理风格的老板领导下的绩效差异。
+COMPARISON_PROMPT = """你是组织行为学研究者。请对比分析同一团队在不同时间管理风格的老板领导下的绩效差异。
 
 ## 讨论主题
 {topic}
@@ -287,17 +324,21 @@ COMPARISON_PROMPT = """你是组织行为学研究者。请对比分析同一团
 ## time_master（高效时间管理者）条件下的评估结果
 {eval_master}
 
+## time_neutral（中性管理者/基线）条件下的评估结果
+{eval_neutral}
+
 ## time_chaos（混乱时间管理者）条件下的评估结果
 {eval_chaos}
 
 请从以下角度进行对比分析:
 
-1. **整体绩效差异**: 两种条件下的加权总分对比及其意义
+1. **整体绩效差异**: 三种条件下的加权总分对比及其意义
 2. **维度差异分析**: 哪些维度差异最大，为什么
-3. **领导风格影响机制**: time_master和time_chaos分别如何影响团队行为
-4. **调节效应**: 项目类型如何调节领导风格对绩效的影响
-5. **理论贡献**: 对时间领导力理论的启示
-6. **实践建议**: 对组织管理的具体建议
+3. **基线效应**: time_neutral 作为基线，time_master 的提升幅度 vs time_chaos 的下降幅度
+4. **领导风格影响机制**: 三种管理者分别如何影响团队行为
+5. **调节效应**: 项目类型如何调节领导风格对绩效的影响
+6. **理论贡献**: 对时间领导力理论的启示
+7. **实践建议**: 对组织管理的具体建议
 
 请提供结构化的对比分析报告，适合直接用于论文写作。"""
 
@@ -306,10 +347,12 @@ def build_comparison_summary_prompt(
     topic: str,
     eval_master: str,
     eval_chaos: str,
+    eval_neutral: str = "",
 ) -> str:
     """Build a prompt for cross-condition comparison analysis."""
     return COMPARISON_PROMPT.format(
         topic=topic,
         eval_master=eval_master,
         eval_chaos=eval_chaos,
+        eval_neutral=eval_neutral if eval_neutral else "(无数据)",
     )
