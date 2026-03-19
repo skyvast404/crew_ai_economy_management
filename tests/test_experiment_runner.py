@@ -19,7 +19,8 @@ class TestExperimentConfig:
     def test_default_experiment(self):
         config = create_default_experiment()
         assert config.topic == "Q3产品发布计划讨论"
-        assert len(config.boss_types) == 2
+        assert len(config.boss_types) == 3
+        assert "time_neutral" in config.boss_types
         assert len(config.team.members) == 12
 
     def test_custom_topic(self):
@@ -192,10 +193,15 @@ class TestSingleRunResult:
 
 class TestBuildComparisonPrompt:
     def test_prompt_contains_topic(self):
-        prompt = build_comparison_summary_prompt("测试话题", "评估A", "评估B")
+        prompt = build_comparison_summary_prompt("测试话题", "评估A", "评估B", "评估C")
         assert "测试话题" in prompt
         assert "评估A" in prompt
         assert "评估B" in prompt
+        assert "评估C" in prompt
+
+    def test_prompt_without_neutral(self):
+        prompt = build_comparison_summary_prompt("话题", "M", "C")
+        assert "(无数据)" in prompt
 
 
 class TestParseEvaluationEdgeCases:

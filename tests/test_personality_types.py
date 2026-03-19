@@ -118,10 +118,11 @@ class TestPreDefinedTypes:
             combos.add((d.urgency, d.action_pattern, d.time_orientation))
         assert len(combos) == 12
 
-    def test_two_boss_types(self):
-        assert len(BOSS_TYPES) == 2
+    def test_three_boss_types(self):
+        assert len(BOSS_TYPES) == 3
         assert "time_master" in BOSS_TYPES
         assert "time_chaos" in BOSS_TYPES
+        assert "time_neutral" in BOSS_TYPES
 
 
 class TestLookupHelpers:

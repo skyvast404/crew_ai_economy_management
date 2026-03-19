@@ -62,15 +62,15 @@ class TestLeadershipStyle:
 
 
 class TestLeadershipStylePresets:
-    """Test the 4 preset leadership styles."""
+    """Test the 5 preset leadership styles."""
 
-    def test_four_styles_defined(self):
-        """Test that exactly 4 styles are defined."""
-        assert len(LEADERSHIP_STYLES) == 4
+    def test_five_styles_defined(self):
+        """Test that exactly 5 styles are defined."""
+        assert len(LEADERSHIP_STYLES) == 5
 
     def test_expected_style_ids(self):
         """Test expected style IDs exist."""
-        expected = {"transformational", "transactional", "servant", "authoritative"}
+        expected = {"transformational", "transactional", "servant", "authoritative", "balanced"}
         assert set(LEADERSHIP_STYLES.keys()) == expected
 
     def test_all_styles_have_required_fields(self):

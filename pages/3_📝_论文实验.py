@@ -3,8 +3,11 @@
 Streamlit page for running controlled experiments comparing
 time_master vs time_chaos boss types on team performance.
 
+Uses phase-based project lifecycle simulation where teams progress
+through project stages (e.g., requirements → development → testing → launch).
+
 4 Tabs:
-  1. 实验配置 — topic, project type, OKR editor, team preview
+  1. 实验配置 — topic, project type, phase count, OKR editor, team preview
   2. 实验运行 — dual-column progress, streaming output
   3. 绩效评估 — 8-dimension radar chart, detail table, findings
   4. 论文素材导出 — structured data, charts, markdown report
@@ -38,6 +41,7 @@ from lib_custom.okr_models import (
     format_okrs_for_prompt,
 )
 from lib_custom.personality_types import BOSS_TYPES, PERSONALITY_TYPES
+from lib_custom.project_phases import get_phase_names_zh
 from lib_custom.runtime_state import (
     STATE as RUNTIME_STATE,
     ensure_event_handlers_registered,
@@ -49,11 +53,17 @@ import streamlit as st
 
 logger = logging.getLogger(__name__)
 
+_BOSS_ICONS: dict[str, str] = {
+    "time_master": "🏆",
+    "time_chaos": "🌪️",
+    "time_neutral": "⚖️",
+}
+
 ensure_event_handlers_registered()
 
 st.set_page_config(page_title="📝 论文实验", page_icon="📝", layout="wide")
 st.title("📝 论文实验：时间驾驭能力与团队绩效")
-st.caption("对比 time_master vs time_chaos 两种老板对同一团队绩效的影响")
+st.caption("对比 time_master / time_neutral / time_chaos 三种老板对同一团队项目执行绩效的影响")
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +120,7 @@ def _build_experiment_result():
         return
 
     runs: dict[str, SingleRunResult] = {}
-    for boss_type_id in ["time_master", "time_chaos"]:
+    for boss_type_id in ["time_master", "time_chaos", "time_neutral"]:
         store = stores.get(boss_type_id)
         if not store:
             continue
@@ -145,7 +155,7 @@ def _build_experiment_result():
             topic=st.session_state.exp_topic,
             okrs=okrs,
             team=team,
-            num_rounds=st.session_state.exp_num_rounds,
+            max_phases=st.session_state.exp_max_phases,
         ),
         runs=runs,
         comparison_summary=comparison_summary,
@@ -154,37 +164,34 @@ def _build_experiment_result():
 
 
 def _build_markdown_table(result: ThesisExperimentResult) -> str:
-    """Build a Markdown table of dimension scores."""
-    lines = [
-        "| 维度 | 权重 | time_master | time_chaos | 差值 |",
-        "|------|------|-------------|------------|------|",
+    """Build a Markdown table of dimension scores for all available boss types."""
+    available = [
+        (bt, result.runs[bt])
+        for bt in ["time_master", "time_neutral", "time_chaos"]
+        if bt in result.runs
     ]
-    master_run = result.runs.get("time_master")
-    chaos_run = result.runs.get("time_chaos")
-    if not master_run or not chaos_run:
-        return "数据不完整"
+    if len(available) < 2:
+        return "数据不完整（至少需要2组）"
+
+    header_names = " | ".join(bt for bt, _ in available)
+    header_sep = " | ".join("---" for _ in available)
+    lines = [
+        f"| 维度 | 权重 | {header_names} |",
+        f"|------|------|{header_sep}|",
+    ]
 
     for dim_id, dim in EVALUATION_DIMENSIONS.items():
-        m_s = master_run.evaluation.dimensions.get(
-            dim_id, DimensionScore(score=0)
-        )
-        c_s = chaos_run.evaluation.dimensions.get(
-            dim_id, DimensionScore(score=0)
-        )
-        diff = m_s.score - c_s.score
-        sign = "+" if diff > 0 else ""
         weight_pct = int(dim.weight * 100)
-        lines.append(
-            f"| {dim.name_zh} | {weight_pct}% "
-            f"| {m_s.score} | {c_s.score} | {sign}{diff} |"
-        )
+        scores = [
+            run.evaluation.dimensions.get(dim_id, DimensionScore(score=0)).score
+            for _, run in available
+        ]
+        score_cells = " | ".join(str(s) for s in scores)
+        lines.append(f"| {dim.name_zh} | {weight_pct}% | {score_cells} |")
 
-    m_total = master_run.evaluation.overall_score
-    c_total = chaos_run.evaluation.overall_score
-    lines.append(
-        f"| **加权总分** | 100% | **{m_total:.1f}** "
-        f"| **{c_total:.1f}** | **{m_total - c_total:+.1f}** |"
-    )
+    totals = [run.evaluation.overall_score for _, run in available]
+    total_cells = " | ".join(f"**{t:.1f}**" for t in totals)
+    lines.append(f"| **加权总分** | 100% | {total_cells} |")
     return "\n".join(lines)
 
 
@@ -207,43 +214,49 @@ def _latex_escape(text: str) -> str:
 
 
 def _build_latex_table(result: ThesisExperimentResult) -> str:
-    """Build a LaTeX table of dimension scores."""
+    """Build a LaTeX table of dimension scores for all available boss types."""
+    available = [
+        (bt, result.runs[bt])
+        for bt in ["time_master", "time_neutral", "time_chaos"]
+        if bt in result.runs
+    ]
+    col_count = len(available) + 2  # dim + weight + N boss types
+    col_spec = "lc" + "c" * len(available)
+    header_names = " & ".join(
+        _latex_escape(bt) for bt, _ in available
+    )
+
     lines = [
         r"\begin{table}[htbp]",
         r"\centering",
         r"\caption{团队绩效8维度评分对比}",
         r"\label{tab:performance}",
-        r"\begin{tabular}{lcccc}",
+        f"\\begin{{tabular}}{{{col_spec}}}",
         r"\toprule",
-        r"维度 & 权重 & time\_master & time\_chaos & 差值 \\",
+        f"维度 & 权重 & {header_names} \\\\",
         r"\midrule",
     ]
-    master_run = result.runs.get("time_master")
-    chaos_run = result.runs.get("time_chaos")
-    if not master_run or not chaos_run:
+
+    if not available:
         lines.append(r"数据不完整 \\")
     else:
         for dim_id, dim in EVALUATION_DIMENSIONS.items():
-            m_s = master_run.evaluation.dimensions.get(
-                dim_id, DimensionScore(score=0)
-            )
-            c_s = chaos_run.evaluation.dimensions.get(
-                dim_id, DimensionScore(score=0)
-            )
-            diff = m_s.score - c_s.score
-            sign = "+" if diff > 0 else ""
             weight_pct = int(dim.weight * 100)
+            scores = [
+                run.evaluation.dimensions.get(
+                    dim_id, DimensionScore(score=0)
+                ).score
+                for _, run in available
+            ]
+            score_cells = " & ".join(str(s) for s in scores)
             lines.append(
                 f"{_latex_escape(dim.name_zh)} & {weight_pct}\\% "
-                f"& {m_s.score} & {c_s.score} & {sign}{diff} \\\\"
+                f"& {score_cells} \\\\"
             )
-        m_total = master_run.evaluation.overall_score
-        c_total = chaos_run.evaluation.overall_score
         lines.append(r"\midrule")
-        lines.append(
-            f"加权总分 & 100\\% & {m_total:.1f} "
-            f"& {c_total:.1f} & {m_total - c_total:+.1f} \\\\"
-        )
+        totals = [run.evaluation.overall_score for _, run in available]
+        total_cells = " & ".join(f"{t:.1f}" for t in totals)
+        lines.append(f"加权总分 & 100\\% & {total_cells} \\\\")
 
     lines.extend([
         r"\bottomrule",
@@ -255,22 +268,24 @@ def _build_latex_table(result: ThesisExperimentResult) -> str:
 
 def _build_full_report(result: ThesisExperimentResult) -> str:
     """Build a complete experiment report in Markdown."""
+    max_phases = result.config.max_phases or 0
     sections: list[str] = [
         "# 论文实验报告：时间驾驭能力与团队绩效",
         "",
         f"**实验时间**: {result.timestamp}",
-        f"**讨论议题**: {result.config.topic}",
+        f"**项目议题**: {result.config.topic}",
         f"**项目类型**: {result.config.okrs.project_type_id}",
-        f"**对话轮数**: {result.config.num_rounds}",
+        f"**最大阶段数**: {max_phases}",
         f"**团队规模**: {len(result.config.team.members)} 人",
         "",
         "---",
         "",
         "## 研究设计",
         "",
-        "- **自变量**: 老板时间管理类型 (time_master vs time_chaos)",
+        "- **自变量**: 老板时间管理类型 (time_master / time_neutral / time_chaos)",
         "- **因变量**: 团队绩效 (8维度评分)",
         "- **调节变量**: 项目类型",
+        "- **模拟模式**: 项目生命周期推进（阶段制）",
         "",
         "## OKR 目标",
         "",
@@ -284,7 +299,7 @@ def _build_full_report(result: ThesisExperimentResult) -> str:
         "",
     ]
 
-    for boss_type_id in ["time_master", "time_chaos"]:
+    for boss_type_id in ["time_master", "time_neutral", "time_chaos"]:
         run = result.runs.get(boss_type_id)
         if not run:
             continue
@@ -316,7 +331,7 @@ def _run_single_experiment(
     boss_type_id: str,
     topic: str,
     okrs: OKRSet,
-    num_rounds: int,
+    max_phases: int,
     store: ChatMessageStore,
     config: dict,
 ):
@@ -337,7 +352,7 @@ def _run_single_experiment(
             boss_type_id=boss_type_id,
             topic=topic,
             okrs=okrs,
-            num_rounds=num_rounds,
+            max_phases=max_phases,
             llm=llm,
             config=config,
         )
@@ -401,13 +416,13 @@ def _run_single_experiment(
 def _run_thesis_experiment_thread(
     topic: str,
     project_type: str,
-    num_rounds: int,
+    max_phases: int,
     stores: dict[str, ChatMessageStore],
     config: dict,
 ):
-    """Background thread: run both boss types sequentially, then compare."""
+    """Background thread: run all boss types sequentially, then compare."""
     okrs = DEFAULT_OKRS[project_type]
-    boss_types = ["time_master", "time_chaos"]
+    boss_types = [bt for bt in BOSS_TYPES if bt in stores]
 
     RUNTIME_STATE.set_llm(
         status="idle",
@@ -433,7 +448,7 @@ def _run_thesis_experiment_thread(
         )
 
         _run_single_experiment(
-            boss_type_id, topic, okrs, num_rounds, store, config
+            boss_type_id, topic, okrs, max_phases, store, config
         )
 
     # Run comparison
@@ -447,26 +462,31 @@ def _run_thesis_experiment_thread(
             last_update=str(time.time()),
         )
 
-        master_store = stores.get("time_master")
-        chaos_store = stores.get("time_chaos")
-        eval_master = (
-            find_evaluator_output(master_store) if master_store else ""
-        )
-        eval_chaos = (
-            find_evaluator_output(chaos_store) if chaos_store else ""
-        )
+        eval_master = ""
+        eval_chaos = ""
+        eval_neutral = ""
+        for bt, store_ref in stores.items():
+            if bt == "__comparison__":
+                continue
+            ev = find_evaluator_output(store_ref) if store_ref else ""
+            if bt == "time_master":
+                eval_master = ev
+            elif bt == "time_chaos":
+                eval_chaos = ev
+            elif bt == "time_neutral":
+                eval_neutral = ev
 
         try:
             RUNTIME_STATE.active_store = comp_store
             RUNTIME_STATE.set_current_prefix("__comparison__")
             llm = create_primary_llm()
             prompt = build_comparison_summary_prompt(
-                topic, eval_master, eval_chaos
+                topic, eval_master, eval_chaos, eval_neutral
             )
 
             agent = Agent(
                 role="跨条件对比分析师",
-                goal="对比分析两种老板类型对团队绩效的差异化影响",
+                goal="对比分析不同老板类型对团队绩效的差异化影响",
                 backstory="你是资深组织行为学研究者，专注时间领导力理论。",
                 verbose=False,
                 allow_delegation=False,
@@ -505,7 +525,7 @@ def _run_thesis_experiment_thread(
 _DEFAULTS: dict = {
     "exp_topic": "Q3产品发布计划讨论",
     "exp_project_type": "urgent_launch",
-    "exp_num_rounds": 3,
+    "exp_max_phases": 4,
     "exp_running": False,
     "exp_stores": {},
     "exp_result": None,
@@ -531,9 +551,9 @@ with tab_config:
     with col_left:
         st.subheader("📋 实验参数")
         topic = st.text_input(
-            "讨论议题",
+            "项目议题",
             value=st.session_state.exp_topic,
-            help="团队会议讨论的话题",
+            help="团队需要推进的项目主题",
         )
         st.session_state.exp_topic = topic
 
@@ -551,14 +571,20 @@ with tab_config:
         )
         st.session_state.exp_project_type = project_type
 
-        num_rounds = st.slider(
-            "对话轮数",
-            min_value=1,
-            max_value=30,
-            value=st.session_state.exp_num_rounds,
-            help="每轮所有角色各发言一次",
+        max_phases = st.slider(
+            "最大项目阶段数",
+            min_value=2,
+            max_value=8,
+            value=st.session_state.exp_max_phases,
+            help="项目最多经历的阶段数（可提前自然结束）",
         )
-        st.session_state.exp_num_rounds = num_rounds
+        st.session_state.exp_max_phases = max_phases
+
+        # Phase names preview
+        phase_names = get_phase_names_zh(project_type)
+        active_phases = phase_names[:max_phases]
+        st.markdown("**项目阶段流程:**")
+        st.markdown(" → ".join(active_phases))
 
         # OKR preview
         st.subheader("📌 OKR 目标")
@@ -577,10 +603,11 @@ with tab_config:
         st.markdown("""
 | 变量 | 说明 |
 |------|------|
-| **自变量(IV)** | 老板时间管理类型 (time_master vs time_chaos) |
+| **自变量(IV)** | 老板时间管理类型 (time_master / time_neutral / time_chaos) |
 | **因变量(DV)** | 团队绩效（8维度评分） |
 | **调节变量** | 项目类型 |
-| **实验设计** | 2 (boss) × 1 (project) = 2 组对比 |
+| **模拟模式** | 项目生命周期推进（阶段制，可自由结束） |
+| **实验设计** | 3 (boss) × 1 (project) = 3 组对比 |
 """)
 
     with col_right:
@@ -649,10 +676,9 @@ with tab_run:
 
     if start_btn and not st.session_state.exp_running:
         stores: dict[str, ChatMessageStore] = {
-            "time_master": ChatMessageStore(),
-            "time_chaos": ChatMessageStore(),
-            "__comparison__": ChatMessageStore(),
+            bt: ChatMessageStore() for bt in BOSS_TYPES
         }
+        stores["__comparison__"] = ChatMessageStore()
         st.session_state.exp_stores = stores
         st.session_state.exp_running = True
         st.session_state.exp_result = None
@@ -661,8 +687,9 @@ with tab_run:
         config = {
             "agent_timeout": 120,
             "max_iterations": 5,
-            "context_window": 4,
+            "context_window": 30,
             "stream": True,
+            "seed": 42,
         }
 
         RUNTIME_STATE.set_progress(
@@ -678,7 +705,7 @@ with tab_run:
             args=(
                 st.session_state.exp_topic,
                 st.session_state.exp_project_type,
-                st.session_state.exp_num_rounds,
+                st.session_state.exp_max_phases,
                 stores,
                 config,
             ),
@@ -691,8 +718,6 @@ with tab_run:
     # Progress display
     stores = st.session_state.exp_stores
     if st.session_state.exp_running and stores:
-        master_store = stores.get("time_master")
-        chaos_store = stores.get("time_chaos")
         comp_store = stores.get("__comparison__")
 
         all_done = all(
@@ -727,22 +752,21 @@ with tab_run:
             st.info(f"🔄 实验进行中 — {label}")
             st.progress(
                 min(max(step / total, 0.0), 1.0),
-                text=f"阶段: {step}/{total}",
+                text=f"进度: {step}/{total}",
             )
             st.caption(
                 f"已运行: {elapsed}s | "
                 f"LLM调用: {completed_count}/{call_count} | {live}"
             )
 
-            col_m, col_c = st.columns(2)
-            with col_m:
-                st.markdown("### 🏆 time_master")
-                if master_store:
-                    _render_full_messages(master_store)
-            with col_c:
-                st.markdown("### 🌪️ time_chaos")
-                if chaos_store:
-                    _render_full_messages(chaos_store)
+            boss_cols = st.columns(len(BOSS_TYPES))
+            for col, bt in zip(boss_cols, BOSS_TYPES):
+                with col:
+                    icon = _BOSS_ICONS.get(bt, "👔")
+                    st.markdown(f"### {icon} {bt}")
+                    bt_store = stores.get(bt)
+                    if bt_store:
+                        _render_full_messages(bt_store)
 
             time.sleep(1.5)
             st.rerun()
@@ -760,17 +784,14 @@ with tab_run:
                 if s.error:
                     st.error(f"{key}: {s.error}")
 
-        col_m, col_c = st.columns(2)
-        master_store = stores.get("time_master")
-        chaos_store = stores.get("time_chaos")
-        with col_m:
-            st.markdown("### 🏆 time_master")
-            if master_store:
-                _render_full_messages(master_store)
-        with col_c:
-            st.markdown("### 🌪️ time_chaos")
-            if chaos_store:
-                _render_full_messages(chaos_store)
+        boss_cols_final = st.columns(len(BOSS_TYPES))
+        for col, bt in zip(boss_cols_final, BOSS_TYPES):
+            with col:
+                icon = _BOSS_ICONS.get(bt, "👔")
+                st.markdown(f"### {icon} {bt}")
+                bt_store = stores.get(bt)
+                if bt_store:
+                    _render_full_messages(bt_store)
 
 
 # ===== TAB 3: 绩效评估 =====
@@ -783,86 +804,67 @@ with tab_eval:
             "然后在「▶️ 实验运行」中启动实验"
         )
     else:
-        master_run = result.runs.get("time_master")
-        chaos_run = result.runs.get("time_chaos")
+        available_runs = [
+            (bt, result.runs[bt])
+            for bt in ["time_master", "time_neutral", "time_chaos"]
+            if bt in result.runs
+        ]
 
-        if not master_run or not chaos_run:
-            st.warning("实验数据不完整，缺少一种或两种老板类型的结果")
+        if len(available_runs) < 2:
+            st.warning("实验数据不完整，至少需要2组老板类型的结果")
         else:
-            master_eval = master_run.evaluation
-            chaos_eval = chaos_run.evaluation
-
             # Overall scores
             st.subheader("📊 加权总分对比")
-            col_sm, col_sd, col_sc = st.columns([2, 1, 2])
-            with col_sm:
-                st.metric(
-                    "🏆 time_master",
-                    f"{master_eval.overall_score:.1f}",
-                )
-            with col_sd:
-                diff = (
-                    master_eval.overall_score - chaos_eval.overall_score
-                )
-                arrow = "↑" if diff > 0 else ("↓" if diff < 0 else "→")
-                color = (
-                    "green" if diff > 0 else ("red" if diff < 0 else "gray")
-                )
-                st.markdown(
-                    f"<h2 style='text-align:center;color:{color}'>"
-                    f"{arrow} {abs(diff):.1f}</h2>",
-                    unsafe_allow_html=True,
-                )
-                st.caption("差值 (master - chaos)")
-            with col_sc:
-                st.metric(
-                    "🌪️ time_chaos",
-                    f"{chaos_eval.overall_score:.1f}",
-                )
+            score_cols = st.columns(len(available_runs))
+            for col, (bt, run) in zip(score_cols, available_runs):
+                icon = _BOSS_ICONS.get(bt, "👔")
+                with col:
+                    st.metric(
+                        f"{icon} {bt}",
+                        f"{run.evaluation.overall_score:.1f}",
+                    )
 
             st.divider()
 
             # Radar chart
+            _RADAR_COLORS = {
+                "time_master": ("#2196F3", "rgba(33, 150, 243, 0.15)"),
+                "time_neutral": ("#4CAF50", "rgba(76, 175, 80, 0.15)"),
+                "time_chaos": ("#FF5722", "rgba(255, 87, 34, 0.15)"),
+            }
+            _RADAR_LABELS = {
+                "time_master": "time_master (高效管理)",
+                "time_neutral": "time_neutral (中性基线)",
+                "time_chaos": "time_chaos (混乱管理)",
+            }
+
             st.subheader("🕸️ 8维度雷达图对比")
             dim_ids = list(EVALUATION_DIMENSIONS.keys())
             dim_names = [
                 EVALUATION_DIMENSIONS[d].name_zh for d in dim_ids
             ]
 
-            master_scores = [
-                master_eval.dimensions.get(
-                    d, DimensionScore(score=0)
-                ).score
-                for d in dim_ids
-            ]
-            chaos_scores = [
-                chaos_eval.dimensions.get(
-                    d, DimensionScore(score=0)
-                ).score
-                for d in dim_ids
-            ]
-
             fig = go.Figure()
-            fig.add_trace(
-                go.Scatterpolar(
-                    r=[*master_scores, master_scores[0]],
-                    theta=[*dim_names, dim_names[0]],
-                    fill="toself",
-                    name="time_master (高效管理)",
-                    line={"color": "#2196F3"},
-                    fillcolor="rgba(33, 150, 243, 0.15)",
+            for bt, run in available_runs:
+                scores = [
+                    run.evaluation.dimensions.get(
+                        d, DimensionScore(score=0)
+                    ).score
+                    for d in dim_ids
+                ]
+                line_color, fill_color = _RADAR_COLORS.get(
+                    bt, ("#9E9E9E", "rgba(158, 158, 158, 0.15)")
                 )
-            )
-            fig.add_trace(
-                go.Scatterpolar(
-                    r=[*chaos_scores, chaos_scores[0]],
-                    theta=[*dim_names, dim_names[0]],
-                    fill="toself",
-                    name="time_chaos (混乱管理)",
-                    line={"color": "#FF5722"},
-                    fillcolor="rgba(255, 87, 34, 0.15)",
+                fig.add_trace(
+                    go.Scatterpolar(
+                        r=[*scores, scores[0]],
+                        theta=[*dim_names, dim_names[0]],
+                        fill="toself",
+                        name=_RADAR_LABELS.get(bt, bt),
+                        line={"color": line_color},
+                        fillcolor=fill_color,
+                    )
                 )
-            )
             fig.update_layout(
                 polar={
                     "radialaxis": {"visible": True, "range": [0, 100]}
@@ -878,39 +880,27 @@ with tab_eval:
             table_data: list[dict] = []
             for dim_id in dim_ids:
                 dim = EVALUATION_DIMENSIONS[dim_id]
-                m_score = master_eval.dimensions.get(
-                    dim_id, DimensionScore(score=0, evidence="无数据")
-                )
-                c_score = chaos_eval.dimensions.get(
-                    dim_id, DimensionScore(score=0, evidence="无数据")
-                )
-                diff_val = m_score.score - c_score.score
                 weight_pct = int(dim.weight * 100)
-                table_data.append({
-                    "维度": f"{dim.name_zh} ({weight_pct}%)",
-                    "time_master": m_score.score,
-                    "time_chaos": c_score.score,
-                    "差值": diff_val,
-                    "master证据": m_score.evidence[:80],
-                    "chaos证据": c_score.evidence[:80],
-                })
+                row_data: dict = {"维度": f"{dim.name_zh} ({weight_pct}%)"}
+                for bt, run in available_runs:
+                    ds = run.evaluation.dimensions.get(
+                        dim_id, DimensionScore(score=0, evidence="无数据")
+                    )
+                    row_data[bt] = ds.score
+                    row_data[f"{bt}_证据"] = ds.evidence[:80]
+                table_data.append(row_data)
             st.dataframe(table_data, use_container_width=True)
 
             # Key findings
             st.subheader("🔍 关键发现")
-            col_fm, col_fc = st.columns(2)
-            with col_fm:
-                st.markdown("**time_master 关键发现:**")
-                for finding in master_eval.key_findings:
-                    st.markdown(f"- {finding}")
-                if master_eval.boss_impact_analysis:
-                    st.info(master_eval.boss_impact_analysis)
-            with col_fc:
-                st.markdown("**time_chaos 关键发现:**")
-                for finding in chaos_eval.key_findings:
-                    st.markdown(f"- {finding}")
-                if chaos_eval.boss_impact_analysis:
-                    st.info(chaos_eval.boss_impact_analysis)
+            finding_cols = st.columns(len(available_runs))
+            for col, (bt, run) in zip(finding_cols, available_runs):
+                with col:
+                    st.markdown(f"**{bt} 关键发现:**")
+                    for finding in run.evaluation.key_findings:
+                        st.markdown(f"- {finding}")
+                    if run.evaluation.boss_impact_analysis:
+                        st.info(run.evaluation.boss_impact_analysis)
 
             # Comparison summary
             if result.comparison_summary:

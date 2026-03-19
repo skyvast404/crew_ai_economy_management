@@ -227,7 +227,10 @@ def vcr_cassette_dir(request: Any) -> str:
             package_root = parent
             break
     else:
+        # For top-level tests, package_root is the project root (parent of tests/)
         package_root = test_file.parent
+        if package_root.name == "tests":
+            package_root = package_root.parent
 
     tests_root = package_root / "tests"
     test_dir = test_file.parent
