@@ -64,6 +64,17 @@ LEADERSHIP_STYLES: dict[str, LeadershipStyle] = {
         boss_emotional_tendency="威严、易怒、对失误零容忍",
         boss_values="服从、纪律、权威、执行力",
     ),
+    "balanced": LeadershipStyle(
+        style_id="balanced",
+        style_name="均衡型领导",
+        description="根据情境灵活调整管理方式，不偏向任何极端",
+        boss_goal="带领团队完成项目目标",
+        boss_backstory="你是一位务实的管理者，相信灵活应变和适度管理是团队成功的关键。",
+        boss_personality="务实、灵活、适度关注",
+        boss_communication_style="视情况而定，兼顾效率与氛围",
+        boss_emotional_tendency="情绪稳定，不过度反应",
+        boss_values="务实、平衡、目标导向",
+    ),
 }
 
 
@@ -95,6 +106,7 @@ def apply_style_to_roles(db: RolesDatabase, style: LeadershipStyle) -> RolesData
 BOSS_TYPE_TO_LEADERSHIP_STYLES: dict[str, list[str]] = {
     "time_master": ["transformational", "servant"],
     "time_chaos": ["transactional", "authoritative"],
+    "time_neutral": ["balanced"],
 }
 
 

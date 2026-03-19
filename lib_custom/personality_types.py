@@ -1,7 +1,7 @@
 """Personality type definitions for team management dashboard.
 
 Defines 12 employee personality types (3 dimensions: urgency × action_pattern × time_orientation)
-and 2 boss management types (time_master / time_chaos).
+and 3 boss management types (time_master / time_chaos / time_neutral).
 """
 
 from __future__ import annotations
@@ -213,6 +213,13 @@ BOSS_TYPES: dict[str, BossType] = {
         description="优先级多变、临时改需求、缺乏规划。给团队带来不确定性和频繁的方向调整。",
         traits=["优先级频繁变动", "临时改需求", "缺乏长期规划", "紧急任务多"],
         management_style="管理风格随性，经常改变方向和优先级。团队需要很强的适应能力和自我管理能力。",
+    ),
+    "time_neutral": BossType(
+        id="time_neutral",
+        name_zh="中性管理者",
+        description="管理风格均衡，不特别强调时间管理，也不刻意制造混乱。按需推进工作。",
+        traits=["任务导向", "情境适应", "不偏不倚", "自然节奏"],
+        management_style="根据实际情况灵活管理，不刻意强调时间框架，也不刻意打乱节奏。",
     ),
 }
 
