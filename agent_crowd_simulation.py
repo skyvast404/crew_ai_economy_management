@@ -506,7 +506,7 @@ def main():
             help="输入一个模拟场景话题",
         )
         num_rounds = st.slider(
-            "对话轮数", min_value=1, max_value=10, value=3,
+            "对话轮数", min_value=1, max_value=30, value=3,
             help="每轮角色各发言一次，轮数越多剧情越丰富",
         )
 

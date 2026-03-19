@@ -554,7 +554,7 @@ with tab_config:
         num_rounds = st.slider(
             "对话轮数",
             min_value=1,
-            max_value=6,
+            max_value=30,
             value=st.session_state.exp_num_rounds,
             help="每轮所有角色各发言一次",
         )

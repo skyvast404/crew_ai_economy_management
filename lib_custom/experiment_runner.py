@@ -37,7 +37,7 @@ class ExperimentConfig(BaseModel):
     okrs: OKRSet
     team: TeamConfig
     boss_types: list[str] = Field(default_factory=lambda: ["time_master", "time_chaos"])
-    num_rounds: int = Field(default=3, ge=1, le=10)
+    num_rounds: int = Field(default=3, ge=1, le=30)
     team_size: int = Field(default=12, ge=2, le=20)
     ttl_level: str | None = Field(default=None, pattern=r"^(low|medium|high)$")
     config: dict = Field(
